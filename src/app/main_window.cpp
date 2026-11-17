@@ -478,7 +478,8 @@ void MainWindow::Paint(HDC dc) {
 
     DrawTextIn(dc, smallFont_, theme_.secondaryText,
                view_.listeners.empty() ? L"Open the link on any phone, tablet or computer on the same network as this PC."
-                                       : L"Delays don't include Bluetooth headphones, which add their own (often 100–200 ms).",
+                                       : L"Bluetooth headphones add 100–200 ms. iPhones count it in the delay shown; "
+                                         L"other devices may not.",
                hintRect_, DT_LEFT | DT_WORDBREAK);
 }
 

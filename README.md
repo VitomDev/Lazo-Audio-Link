@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Hear your PC's sound on your phone, or on any other device with a browser, live over your home network. 🎧  
-Watching a video on a desktop PC without Bluetooth? Open Lazo, scan its QR code with your phone, tap **Listen**, and the sound plays in the headphones connected to your phone, with a delay of about a tenth of a second. A tablet or a laptop works the same way: just open the link.
+Watching a video on a desktop PC without Bluetooth? Open Lazo, scan its QR code with your phone, tap **Listen**, and the sound plays in the headphones connected to your phone, with a delay of about a tenth of a second (plus what Bluetooth headphones add). A tablet or a laptop works the same way: just open the link.
 
 **Nothing to install on the other device**, no accounts, no cloud: the sound goes straight from the PC to it on your local network.
 
@@ -70,7 +70,7 @@ Uninstalling (Settings → Apps) removes Lazo, its startup entry and its setting
 | Settings | **Settings** in the window, or right-click the tray icon → **Settings** |
 | Exit | Right-click the tray icon → **Exit Lazo** |
 
-🎧 Bluetooth headphones add their own delay (often 100–200 ms) on top of Lazo's buffer.
+🎧 Bluetooth headphones add their own delay (often 100–200 ms). On iPhone it's already included in the delay Lazo shows; other devices may leave it out.
 
 ### ⚙️ Settings
 

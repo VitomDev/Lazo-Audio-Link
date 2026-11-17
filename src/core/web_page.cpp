@@ -124,7 +124,7 @@ input[type=range]:disabled { opacity: .45; }
   </section>
 
   <div class="notes hint">
-    <p>Bluetooth headphones add their own delay (often 100–200 ms) on top of what Lazo shows.</p>
+    <p>Bluetooth headphones add their own delay (often 100–200 ms). iPhones already count it in the delay above; other devices may not.</p>
     <p>Add this page to your home screen to open it in one tap next time.</p>
   </div>
 </main>
