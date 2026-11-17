@@ -1,0 +1,34 @@
+#include <windows.h>
+#include "resource.h"
+#include "../version.h"
+
+IDI_LAZO ICON "../../assets/lazo.ico"
+// The page's home screen icon on phones.
+IDR_TOUCH_ICON RCDATA "../../assets/lazo.png"
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "Lazo.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION LAZO_VERSION_MAJOR, LAZO_VERSION_MINOR, LAZO_VERSION_PATCH, 0
+PRODUCTVERSION LAZO_VERSION_MAJOR, LAZO_VERSION_MINOR, LAZO_VERSION_PATCH, 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "VitomDev"
+            VALUE "FileDescription", "Lazo Audio Link"
+            VALUE "FileVersion", LAZO_VERSION_STRING
+            VALUE "InternalName", "Lazo"
+            VALUE "LegalCopyright", "Copyright (c) 2026 VitomDev. MIT License."
+            VALUE "OriginalFilename", "Lazo.exe"
+            VALUE "ProductName", "Lazo Audio Link"
+            VALUE "ProductVersion", LAZO_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -1,0 +1,15 @@
+{
+  "appId": "{533A70FB-B169-4958-AF60-1AD99C6ACBE0}",
+  "name": "Lazo Audio Link",
+  "category": "Media",
+  "icon": "assets/lazo.png",
+  "screenshots": [
+    "assets/screenshots/screenshot-1.png"
+  ],
+  "installer": "LazoSetup.exe",
+  "exe": "Lazo.exe",
+  "settings": [
+    "%LOCALAPPDATA%\Lazo Audio Link",
+    "HKCU\Software\Lazo Audio Link"
+  ]
+}

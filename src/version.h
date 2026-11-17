@@ -1,0 +1,6 @@
+#pragma once
+
+#define LAZO_VERSION_MAJOR 0
+#define LAZO_VERSION_MINOR 1
+#define LAZO_VERSION_PATCH 0
+#define LAZO_VERSION_STRING "0.1.0"
