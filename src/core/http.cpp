@@ -208,6 +208,29 @@ std::wstring FormatIPv4(uint32_t address) {
            std::to_wstring((address >> 8) & 0xFF) + L"." + std::to_wstring(address & 0xFF);
 }
 
+std::optional<ListenerStats> ParseListenerStats(std::string_view json) {
+    const auto number = [&](std::string_view key) -> std::optional<int> {
+        const std::string quoted = "\"" + std::string(key) + "\":";
+        const size_t at = json.find(quoted);
+        if (at == std::string_view::npos) return std::nullopt;
+        std::string_view rest = json.substr(at + quoted.size());
+        while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+        double value = 0;
+        const auto result = std::from_chars(rest.data(), rest.data() + rest.size(), value);
+        if (result.ec != std::errc() || !(value >= 0) || value > 1e7) return std::nullopt;
+        return static_cast<int>(value + 0.5);
+    };
+    if (json.empty() || json.front() != '{') return std::nullopt;
+    const auto buffer = number("buffer");
+    if (!buffer) return std::nullopt;
+    ListenerStats stats;
+    stats.bufferMs = *buffer;
+    stats.outputMs = number("output").value_or(0);
+    stats.dropouts = number("dropouts").value_or(0);
+    stats.skips = number("skips").value_or(0);
+    return stats;
+}
+
 std::wstring DeviceNameFromUserAgent(std::string_view userAgent) {
     // Order matters: iPad's Safari may claim to be a Mac, Android ones Linux.
     if (ContainsNoCase(userAgent, "iPhone")) return L"iPhone";

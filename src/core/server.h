@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/http.h"
+#include "core/pcm.h"
 
 #include <winsock2.h>
 #include <windows.h>
@@ -27,12 +28,18 @@ struct Listener {
     uint32_t address = 0;  // host byte order
     ULONGLONG since = 0;   // GetTickCount64
     uint32_t dropped = 0;  // packets skipped because the network fell behind
+    bool saver = false;    // gets the data saver stream
+    bool hasStats = false;
+    ListenerStats stats;   // as last reported by the page
 };
 
 struct ServerOptions {
     uint32_t address = 0;  // host byte order; the server listens on this address only
     int port = 0;          // the first of ten ports tried
     std::string token;
+    // The host the link names: "lazo-pc.local" (answered by MdnsResponder),
+    // or empty for the IP address.
+    std::string hostName;
     std::wstring pcName;
     std::string touchIcon;       // PNG for the phone's home screen, may be empty
     bool allowLoopback = false;  // tests talk to 127.0.0.1
@@ -60,9 +67,10 @@ public:
 
     bool IsRunning() const { return running_; }
     int Port() const { return port_; }
-    uint32_t Address() const { return options_.address; }
-    // http://192.168.1.20:8765/?t=<token>, what the QR code holds.
+    // http://lazo-pc.local:8765/?t=<token> (or the IP), what the QR code holds.
     std::wstring Url() const;
+    // The same without the token, to show on screen.
+    std::wstring Address() const;
 
     // The audio's format. Phones get it before any audio, and again when it
     // changes (another output with another sample rate).
@@ -84,7 +92,7 @@ private:
     void Serve(SOCKET socket, uint32_t peer);
     bool Handle(SOCKET socket, const RequestHead& request, uint32_t peer);
     void ServeWebSocket(SOCKET socket, const RequestHead& request, uint32_t peer);
-    std::string ConfigFrame() const;  // needs mutex_
+    std::string ConfigFrame(bool saver) const;  // needs mutex_
     void Notify();
 
     HWND notifyWindow_;
@@ -103,6 +111,8 @@ private:
     uint32_t nextId_ = 1;
     uint32_t rate_ = 0;
     size_t framesPerPacket_ = 0;
+    SaverDownsampler saverDownsampler_;
+    std::vector<int16_t> saverSamples_;
     ULONGLONG lastListening_ = 0;
 };
 

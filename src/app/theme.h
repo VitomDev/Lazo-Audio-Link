@@ -62,6 +62,7 @@ inline constexpr wchar_t kSettings[] = L"";
 inline constexpr wchar_t kChevronDown[] = L"";
 inline constexpr wchar_t kPhone[] = L"";
 inline constexpr wchar_t kLaptop[] = L"";
+inline constexpr wchar_t kApp[] = L"\uE71D";
 inline constexpr wchar_t kSpeakers[] = L"";
 }  // namespace icons
 

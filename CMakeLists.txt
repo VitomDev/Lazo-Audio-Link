@@ -30,6 +30,7 @@ add_link_options(/guard:cf /CETCOMPAT /OPT:REF /OPT:ICF)
 add_library(lazocore STATIC
     src/core/audio.cpp
     src/core/http.cpp
+    src/core/mdns.cpp
     src/core/network.cpp
     src/core/paths.cpp
     src/core/pcm.cpp
@@ -43,7 +44,7 @@ add_library(lazocore STATIC
 target_include_directories(lazocore PUBLIC src)
 # ZXing's internal headers (the QR writer) are included as system headers.
 target_include_directories(lazocore SYSTEM PRIVATE ${LAZO_ZXING_SOURCE}/core/src)
-target_link_libraries(lazocore PUBLIC ws2_32 iphlpapi bcrypt ole32 user32 advapi32 PRIVATE ZXing::ZXing)
+target_link_libraries(lazocore PUBLIC ws2_32 iphlpapi bcrypt ole32 user32 advapi32 mmdevapi version PRIVATE ZXing::ZXing)
 
 add_executable(Lazo WIN32
     src/app/main.cpp

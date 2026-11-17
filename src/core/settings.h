@@ -20,6 +20,13 @@ struct Settings {
     int port = kDefaultPort;
     // The output whose sound is sent; empty follows the Windows default.
     std::wstring outputId;
+    // Set: only this application's sound is sent ("chrome.exe"), whatever
+    // output it plays on. The name is shown while it is closed.
+    std::wstring appExe;
+    std::wstring appName;
+    // The link uses the PC's name (lazo-<pc>.local) instead of its IP, so a
+    // saved link keeps working when the router gives the PC another IP.
+    bool stableLink = true;
     // Stop streaming after this long with nobody listening; 0 never stops.
     int idleStopMinutes = 0;
     bool muteSpeakers = false;

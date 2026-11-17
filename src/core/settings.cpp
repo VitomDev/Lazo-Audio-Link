@@ -53,6 +53,9 @@ Settings Settings::Load(const wchar_t* keyPath) {
     if (ReadDword(key, L"MuteSpeakers", value)) settings.muteSpeakers = value != 0;
     if (ReadDword(key, L"NotifyConnections", value)) settings.notifyConnections = value != 0;
     ReadString(key, L"Output", settings.outputId);
+    ReadString(key, L"App", settings.appExe);
+    ReadString(key, L"AppName", settings.appName);
+    if (ReadDword(key, L"StableLink", value)) settings.stableLink = value != 0;
     ReadString(key, L"MutedOutput", settings.mutedOutputId);
     std::wstring token;
     if (ReadString(key, L"Token", token) && IsValidToken(ToUtf8(token))) settings.token = ToUtf8(token);
@@ -69,6 +72,8 @@ bool Settings::Save(const wchar_t* keyPath) const {
                        WriteDword(key, L"IdleStopMinutes", static_cast<DWORD>(idleStopMinutes)) &&
                        WriteDword(key, L"MuteSpeakers", muteSpeakers ? 1 : 0) &&
                        WriteDword(key, L"NotifyConnections", notifyConnections ? 1 : 0) &&
+                       WriteDword(key, L"StableLink", stableLink ? 1 : 0) && WriteString(key, L"App", appExe) &&
+                       WriteString(key, L"AppName", appName) &&
                        WriteString(key, L"Output", outputId) && WriteString(key, L"MutedOutput", mutedOutputId) &&
                        WriteString(key, L"Token", FromUtf8(token));
     RegCloseKey(key);

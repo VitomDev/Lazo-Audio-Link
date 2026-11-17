@@ -214,8 +214,52 @@ uint64_t SilenceFill::Due(uint64_t now) {
     return due;
 }
 
-std::string StreamConfigJson(uint32_t rate, size_t framesPerPacket, std::wstring_view pcName) {
-    return "{\"rate\":" + std::to_string(rate) + ",\"channels\":2,\"frame\":" + std::to_string(framesPerPacket) +
+SaverDownsampler::SaverDownsampler() {
+    // 31-tap windowed-sinc low-pass at 0.225 of the input rate (10.8 kHz
+    // at 48 kHz), Blackman window: quiet above the new Nyquist frequency.
+    constexpr int kTaps = 31;
+    constexpr double kCutoff = 0.225;
+    constexpr double kPi = 3.14159265358979323846;
+    taps_.resize(kTaps);
+    double sum = 0.0;
+    for (int i = 0; i < kTaps; ++i) {
+        const double x = i - (kTaps - 1) / 2.0;
+        const double sinc = x == 0.0 ? 2.0 * kCutoff : std::sin(2.0 * kPi * kCutoff * x) / (kPi * x);
+        const double window = 0.42 - 0.5 * std::cos(2.0 * kPi * i / (kTaps - 1)) + 0.08 * std::cos(4.0 * kPi * i / (kTaps - 1));
+        taps_[static_cast<size_t>(i)] = static_cast<float>(sinc * window);
+        sum += sinc * window;
+    }
+    for (float& tap : taps_) tap = static_cast<float>(tap / sum);  // unity gain at DC
+    Reset();
+}
+
+void SaverDownsampler::Reset() {
+    history_.assign(taps_.size() - 1, 0.0f);
+    odd_ = false;
+}
+
+void SaverDownsampler::Process(const int16_t* stereo, size_t frames, std::vector<int16_t>& mono) {
+    const size_t keep = taps_.size() - 1;
+    // Work on the history followed by this packet's mono samples.
+    std::vector<float> input(history_);
+    input.reserve(keep + frames);
+    for (size_t i = 0; i < frames; ++i) input.push_back((stereo[2 * i] + stereo[2 * i + 1]) * (0.5f / 32768.0f));
+    for (size_t i = 0; i < frames; ++i) {
+        const bool drop = odd_;
+        odd_ = !odd_;
+        if (drop) continue;
+        // Output for input sample i: taps over input[i .. i + keep].
+        float sum = 0.0f;
+        const float* window = input.data() + i;
+        for (size_t t = 0; t < taps_.size(); ++t) sum += window[t] * taps_[t];
+        mono.push_back(FloatToInt16(sum));
+    }
+    history_.assign(input.end() - static_cast<std::ptrdiff_t>(keep), input.end());
+}
+
+std::string StreamConfigJson(uint32_t rate, int channels, size_t framesPerPacket, std::wstring_view pcName) {
+    return "{\"rate\":" + std::to_string(rate) + ",\"channels\":" + std::to_string(channels) +
+           ",\"frame\":" + std::to_string(framesPerPacket) +
            ",\"pc\":\"" + JsonEscape(ToUtf8(pcName)) + "\"}";
 }
 

@@ -16,7 +16,8 @@ namespace lazo {
 using ApplySettings = std::function<bool(const Settings& settings, bool autostart, std::wstring& error)>;
 
 // The small Settings window. Modal; a second request focuses the open one.
+// `apps` are offered as single sources when `appsSupported`.
 void ShowSettingsDialog(HINSTANCE instance, HWND owner, const Settings& current, const std::vector<OutputDevice>& outputs,
-                        const ApplySettings& apply);
+                        const std::vector<AudioApp>& apps, bool appsSupported, const ApplySettings& apply);
 
 }  // namespace lazo

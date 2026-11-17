@@ -8,6 +8,8 @@
 
 #include "core/audio.h"
 #include "core/http.h"
+#include "core/mdns.h"
+#include "core/network.h"
 #include "core/pcm.h"
 #include "core/qr.h"
 #include "core/server.h"
@@ -20,12 +22,15 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <objbase.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
 #include <ks.h>
 #include <ksmedia.h>
 
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -203,8 +208,9 @@ struct WsClient {
 struct TestServer {
     Server server;
 
-    explicit TestServer(int port = 18765) {
+    explicit TestServer(int port = 18765, const std::string& hostName = "") {
         ServerOptions options;
+        options.hostName = hostName;
         options.address = kLoopback;
         options.port = port;
         options.token = kToken;
@@ -530,7 +536,190 @@ TEST(FillsSilenceOnlyWhenAudioStops) {
 }
 
 TEST(DescribesTheStream) {
-    CHECK(StreamConfigJson(44100, 441, L"Desk \"PC\"") == "{\"rate\":44100,\"channels\":2,\"frame\":441,\"pc\":\"Desk \\\"PC\\\"\"}");
+    CHECK(StreamConfigJson(44100, 2, 441, L"Desk \"PC\"") == "{\"rate\":44100,\"channels\":2,\"frame\":441,\"pc\":\"Desk \\\"PC\\\"\"}");
+    CHECK(StreamConfigJson(24000, 1, 240, L"PC") == "{\"rate\":24000,\"channels\":1,\"frame\":240,\"pc\":\"PC\"}");
+}
+
+// One packet of a stereo sine, `frequency` Hz at 48 kHz, continuing `phase`.
+std::vector<int16_t> Sine(double frequency, size_t frames, double& phase, double amplitude = 0.5) {
+    std::vector<int16_t> stereo(frames * 2);
+    for (size_t i = 0; i < frames; ++i) {
+        const auto sample = static_cast<int16_t>(std::lround(amplitude * 32767 * std::sin(phase)));
+        stereo[2 * i] = stereo[2 * i + 1] = sample;
+        phase += 2 * 3.14159265358979 * frequency / 48000;
+    }
+    return stereo;
+}
+
+double Rms(const std::vector<int16_t>& samples, size_t skip) {
+    double sum = 0;
+    for (size_t i = skip; i < samples.size(); ++i) sum += static_cast<double>(samples[i]) * samples[i];
+    return std::sqrt(sum / static_cast<double>(samples.size() - skip)) / 32768.0;
+}
+
+TEST(DataSaverHalvesTheRateInMono) {
+    SaverDownsampler downsampler;
+    std::vector<int16_t> mono;
+    // Left and right are averaged; the output has half the frames.
+    std::vector<int16_t> stereo(480 * 2);
+    for (size_t i = 0; i < 480; ++i) {
+        stereo[2 * i] = 10000;
+        stereo[2 * i + 1] = 2000;
+    }
+    for (int packet = 0; packet < 4; ++packet) downsampler.Process(stereo.data(), 480, mono);
+    CHECK(mono.size() == 4 * 240);
+    // DC passes at unity once the filter has filled.
+    CHECK(std::abs(mono.back() - 6000) <= 2);
+
+    // Odd packet sizes (44.1 kHz: 441 frames) keep the 2:1 ratio overall.
+    downsampler.Reset();
+    mono.clear();
+    for (int packet = 0; packet < 10; ++packet) downsampler.Process(stereo.data(), 441, mono);
+    CHECK(mono.size() == 2205);
+}
+
+TEST(DataSaverFiltersWhatCannotFit) {
+    // 1 kHz passes; 20 kHz, above the new 12 kHz limit, must not fold back.
+    for (const double frequency : {1000.0, 20000.0}) {
+        SaverDownsampler downsampler;
+        std::vector<int16_t> mono;
+        double phase = 0;
+        for (int packet = 0; packet < 20; ++packet) {
+            const auto stereo = Sine(frequency, 480, phase);
+            downsampler.Process(stereo.data(), 480, mono);
+        }
+        const double rms = Rms(mono, 100);
+        if (frequency < 2000) {
+            CHECK(rms > 0.33 && rms < 0.37);  // 0.5 / sqrt(2)
+        } else {
+            CHECK(rms < 0.01);
+        }
+    }
+}
+
+TEST(DataSaverIsContinuousAcrossPackets) {
+    // The same sine in packets of 480 or in one go gives the same output.
+    SaverDownsampler inPackets;
+    SaverDownsampler inOneGo;
+    std::vector<int16_t> a, b;
+    double phase = 0;
+    const auto whole = Sine(3000, 4800, phase);
+    for (size_t offset = 0; offset < 4800; offset += 480) inPackets.Process(whole.data() + offset * 2, 480, a);
+    inOneGo.Process(whole.data(), 4800, b);
+    CHECK(a == b);
+}
+
+TEST(ParsesListenerStats) {
+    const auto stats = ParseListenerStats("{\"buffer\":93,\"output\":50.4,\"dropouts\":2,\"skips\":1,\"extra\":true}");
+    CHECK(stats && stats->bufferMs == 93 && stats->outputMs == 50 && stats->dropouts == 2 && stats->skips == 1);
+    const auto partial = ParseListenerStats("{\"buffer\": 80}");
+    CHECK(partial && partial->bufferMs == 80 && partial->outputMs == 0);
+    CHECK(!ParseListenerStats(""));
+    CHECK(!ParseListenerStats("{\"output\":5}"));
+    CHECK(!ParseListenerStats("{\"buffer\":-5}"));
+    CHECK(!ParseListenerStats("{\"buffer\":\"x\"}"));
+}
+
+// --- mDNS -------------------------------------------------------------------------------
+
+std::vector<uint8_t> MdnsQuery(const std::string& name, uint16_t type, uint16_t id, bool unicast) {
+    std::vector<uint8_t> packet = {static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id), 0, 0, 0, 1, 0, 0, 0, 0, 0, 0};
+    size_t start = 0;
+    while (start <= name.size()) {
+        const size_t dot = std::min(name.find('.', start), name.size());
+        packet.push_back(static_cast<uint8_t>(dot - start));
+        packet.insert(packet.end(), name.begin() + static_cast<std::ptrdiff_t>(start), name.begin() + static_cast<std::ptrdiff_t>(dot));
+        start = dot + 1;
+    }
+    packet.push_back(0);
+    packet.push_back(static_cast<uint8_t>(type >> 8));
+    packet.push_back(static_cast<uint8_t>(type));
+    packet.push_back(unicast ? 0x80 : 0x00);
+    packet.push_back(1);
+    return packet;
+}
+
+TEST(NamesTheStableLink) {
+    CHECK(LinkHostLabel(L"DESKTOP-RMJQ812") == "lazo-desktop-rmjq812");
+    CHECK(LinkHostLabel(L"Víctor's PC") == "lazo-v-ctor-s-pc");
+    CHECK(LinkHostLabel(L"") == "lazo-pc");
+    CHECK(LinkHostLabel(L"---") == "lazo-pc");
+    CHECK(LinkHostLabel(std::wstring(100, L'a')).size() == 63);
+}
+
+TEST(ParsesMdnsQueries) {
+    const auto packet = MdnsQuery("lazo-pc.local", 1, 0x1234, true);
+    const auto query = mdns::ParseQuery(packet.data(), packet.size());
+    CHECK(query && query->id == 0x1234 && query->questions.size() == 1);
+    CHECK(query->questions[0].name == "lazo-pc.local" && query->questions[0].type == 1 && query->questions[0].unicastResponse);
+    CHECK(mdns::NameEquals("LAZO-PC.local.", "lazo-pc.local"));
+    CHECK(!mdns::NameEquals("lazo-pc.local", "lazo-pc2.local"));
+
+    // A compressed second question pointing back at the first name.
+    std::vector<uint8_t> two = packet;
+    two[5] = 2;
+    two.insert(two.end(), {0xC0, 12, 0, 28, 0, 1});
+    const auto both = mdns::ParseQuery(two.data(), two.size());
+    CHECK(both && both->questions.size() == 2 && both->questions[1].name == "lazo-pc.local" && both->questions[1].type == 28);
+
+    // Responses, truncated packets and pointer loops are ignored.
+    std::vector<uint8_t> response = packet;
+    response[2] = 0x84;
+    CHECK(!mdns::ParseQuery(response.data(), response.size()));
+    CHECK(!mdns::ParseQuery(packet.data(), 15));
+    std::vector<uint8_t> loop = {0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0xC0, 12, 0, 1, 0, 1};
+    CHECK(!mdns::ParseQuery(loop.data(), loop.size()));
+}
+
+TEST(BuildsMdnsAnswers) {
+    const auto answer = mdns::BuildAnswer("lazo-pc.local", 0xC0A80114, 0, false);
+    // Header: id 0, response + authoritative, no question, one answer.
+    CHECK(answer.size() == 12 + 15 + 10 + 4);
+    CHECK(answer[2] == 0x84 && answer[5] == 0 && answer[7] == 1);
+    const size_t record = 12 + 15;
+    CHECK(answer[record] == 0 && answer[record + 1] == 1);        // type A
+    CHECK(answer[record + 2] == 0x80 && answer[record + 3] == 1);  // cache-flush, IN
+    CHECK(answer[answer.size() - 4] == 192 && answer[answer.size() - 1] == 20);
+
+    // Legacy unicast queries get their id and question back.
+    const auto legacy = mdns::BuildAnswer("lazo-pc.local", 0xC0A80114, 0xBEEF, true);
+    CHECK(legacy[0] == 0xBE && legacy[1] == 0xEF && legacy[5] == 1 && legacy.size() == answer.size() + 15 + 4);
+}
+
+TEST(AnswersMdnsQueriesOnTheNetwork) {
+    const auto address = FindLocalAddress();
+    if (!address) throw Skip{"not on a private network"};
+    MdnsResponder responder;
+    if (!responder.Start("lazo-test-responder.local", *address)) throw Skip{"cannot join the mDNS group here"};
+    // A legacy query to the group, from an ordinary port, is answered
+    // straight back to that port.
+    SOCKET client = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    const DWORD timeout = 1500;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    in_addr interfaceAddress{};
+    interfaceAddress.s_addr = htonl(*address);
+    setsockopt(client, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&interfaceAddress), sizeof(interfaceAddress));
+    sockaddr_in bound{};
+    bound.sin_family = AF_INET;
+    bound.sin_addr.s_addr = htonl(*address);
+    bind(client, reinterpret_cast<const sockaddr*>(&bound), sizeof(bound));
+    sockaddr_in target{};
+    target.sin_family = AF_INET;
+    target.sin_port = htons(5353);
+    target.sin_addr.s_addr = htonl(0xE00000FB);
+    const auto query = MdnsQuery("lazo-test-responder.local", 1, 0x4242, false);
+    sendto(client, reinterpret_cast<const char*>(query.data()), static_cast<int>(query.size()), 0,
+           reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+    uint8_t reply[512];
+    bool answered = false;
+    for (int i = 0; i < 5 && !answered; ++i) {
+        const int size = recv(client, reinterpret_cast<char*>(reply), sizeof(reply), 0);
+        if (size <= 0) break;
+        answered = size > 12 && reply[0] == 0x42 && reply[1] == 0x42 && (reply[2] & 0x80);
+    }
+    closesocket(client);
+    responder.Stop();
+    CHECK(answered);
 }
 
 // --- Page, QR and settings ----------------------------------------------------------
@@ -558,7 +747,8 @@ TEST(SavesSettings) {
     RegDeleteTreeW(HKEY_CURRENT_USER, kTestSettingsKey);
     Settings defaults = Settings::Load(kTestSettingsKey);
     CHECK(defaults.port == kDefaultPort && defaults.idleStopMinutes == 0 && !defaults.muteSpeakers &&
-          defaults.notifyConnections && defaults.token.empty() && defaults.outputId.empty());
+          defaults.notifyConnections && defaults.token.empty() && defaults.outputId.empty() && defaults.appExe.empty() &&
+          defaults.stableLink);
 
     Settings settings;
     settings.port = 9000;
@@ -568,10 +758,14 @@ TEST(SavesSettings) {
     settings.notifyConnections = false;
     settings.token = kToken;
     settings.mutedOutputId = L"{0.0.0.00000000}.{def}";
+    settings.appExe = L"chrome.exe";
+    settings.appName = L"Google Chrome";
+    settings.stableLink = false;
     CHECK(settings.Save(kTestSettingsKey));
     const Settings loaded = Settings::Load(kTestSettingsKey);
     CHECK(loaded.port == 9000 && loaded.outputId == settings.outputId && loaded.idleStopMinutes == 30 &&
-          loaded.muteSpeakers && !loaded.notifyConnections && loaded.token == kToken && loaded.mutedOutputId == settings.mutedOutputId);
+          loaded.muteSpeakers && !loaded.notifyConnections && loaded.token == kToken && loaded.mutedOutputId == settings.mutedOutputId &&
+          loaded.appExe == L"chrome.exe" && loaded.appName == L"Google Chrome" && !loaded.stableLink);
 
     // Values out of range fall back to the defaults.
     DWORD badPort = 80, badIdle = 7;
@@ -690,6 +884,47 @@ TEST(ServerSkipsPacketsForSlowListeners) {
     CHECK(frames > 0 && frames < 1000);
 }
 
+TEST(ServerSendsTheDataSaverStream) {
+    TestServer test;
+    test.server.SetFormat(48000, 480);
+    WsClient full;
+    WsClient saver;
+    CHECK(full.Open(test.port(), test.ws()));
+    CHECK(saver.Open(test.port(), test.ws() + "&q=saver"));
+    CHECK(WaitFor([&] { return test.server.ListenerCount() == 2; }));
+    CHECK(full.Next().payload.find("\"rate\":48000,\"channels\":2") != std::string::npos);
+    CHECK(saver.Next().payload.find("\"rate\":24000,\"channels\":1,\"frame\":240") != std::string::npos);
+    std::vector<int16_t> packet(480 * 2, 3000);
+    test.server.Broadcast(packet.data(), 480);
+    CHECK(full.Next().payload.size() == 1920);
+    CHECK(saver.Next().payload.size() == 480);  // 240 mono samples
+    const auto listeners = test.server.Listeners();
+    CHECK(listeners.size() == 2 && listeners[0].saver != listeners[1].saver);
+}
+
+TEST(ServerKeepsWhatThePageReports) {
+    TestServer test;
+    WsClient phone;
+    CHECK(phone.Open(test.port(), test.ws()));
+    CHECK(WaitFor([&] { return test.server.ListenerCount() == 1; }));
+    CHECK(!test.server.Listeners()[0].hasStats);
+    phone.SendFrame(websocket::kText, "{\"buffer\":81,\"output\":40,\"dropouts\":1,\"skips\":0}");
+    CHECK(WaitFor([&] { return test.server.Listeners()[0].hasStats; }));
+    const Listener listener = test.server.Listeners()[0];
+    CHECK(listener.stats.bufferMs == 81 && listener.stats.outputMs == 40 && listener.stats.dropouts == 1);
+}
+
+TEST(ServerLinksByNameOrAddress) {
+    TestServer byName(18810, "lazo-pc.local");
+    CHECK(byName.server.Url() == std::wstring(L"http://lazo-pc.local:18810/?t=") + FromUtf8(kToken));
+    CHECK(byName.server.Address() == L"http://lazo-pc.local:18810");
+    TestServer byAddress(18820);
+    CHECK(byAddress.server.Address() == L"http://127.0.0.1:18820");
+    // The page and its stream work through the name too.
+    WsClient phone;
+    CHECK(phone.Open(byName.port(), byName.ws(), "http://127.0.0.1:" + std::to_string(byName.port())));
+}
+
 TEST(ServerStopsAndDisconnects) {
     TestServer test;
     WsClient phone;
@@ -742,7 +977,7 @@ TEST(CapturesTheDefaultOutput) {
     std::atomic<size_t> framesPerPacket{0};
     Capture capture;
     capture.Start(
-        L"",
+        CaptureSource{},
         [&](const int16_t*, size_t frames) {
             if (frames != framesPerPacket) ++badSizes;
             ++packets;
@@ -761,6 +996,94 @@ TEST(CapturesTheDefaultOutput) {
     CHECK(count >= 80 && count <= 115);
     CHECK(!name.empty());
     CHECK(!capture.IsRunning() && capture.DeviceName().empty());
+}
+
+// Plays a quiet tone from this process for `milliseconds`.
+void PlayTone(int milliseconds) {
+    IMMDeviceEnumerator* enumerator = nullptr;
+    IMMDevice* device = nullptr;
+    IAudioClient* client = nullptr;
+    IAudioRenderClient* render = nullptr;
+    WAVEFORMATEX* mix = nullptr;
+    CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
+    if (!enumerator || FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)) ||
+        FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&client))) ||
+        FAILED(client->GetMixFormat(&mix)) || FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 2'000'000, 0, mix, nullptr)) ||
+        FAILED(client->GetService(IID_PPV_ARGS(&render)))) {
+        throw Skip{"cannot play on the default output"};
+    }
+    const auto format = DescribeFormat(*mix);
+    if (!format || format->type != SampleType::Float32) throw Skip{"the output is not float"};
+    UINT32 size = 0;
+    client->GetBufferSize(&size);
+    double phase = 0;
+    const auto fill = [&] {
+        UINT32 padding = 0;
+        client->GetCurrentPadding(&padding);
+        BYTE* data = nullptr;
+        if (size == padding || FAILED(render->GetBuffer(size - padding, &data))) return;
+        auto* samples = reinterpret_cast<float*>(data);
+        for (UINT32 i = 0; i < size - padding; ++i) {
+            for (int c = 0; c < format->channels; ++c) samples[i * format->channels + c] = 0.05f * static_cast<float>(std::sin(phase));
+            phase += 2 * 3.14159265358979 * 440 / format->rate;
+        }
+        render->ReleaseBuffer(size - padding, 0);
+    };
+    fill();
+    client->Start();
+    for (int waited = 0; waited < milliseconds; waited += 20) {
+        fill();
+        Sleep(20);
+    }
+    client->Stop();
+    CoTaskMemFree(mix);
+    render->Release();
+    client->Release();
+    device->Release();
+    enumerator->Release();
+}
+
+TEST(CapturesOneApp) {
+    if (!AppCaptureSupported()) throw Skip{"needs Windows 10 2004 or newer"};
+    if (DefaultOutputId().empty()) throw Skip{"no audio output on this PC"};
+    // Record only this test program while it plays a tone.
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    CaptureSource source;
+    source.appExe = std::filesystem::path(path).filename().wstring();
+    std::atomic<float> peak{0};
+    std::atomic<size_t> packets{0};
+    std::atomic<uint32_t> rate{0};
+    Capture capture;
+    capture.Start(
+        source,
+        [&](const int16_t* stereo, size_t frames) {
+            peak = std::max(peak.load(), PeakLevel(stereo, frames * 2));
+            ++packets;
+        },
+        [&](uint32_t r, size_t) { rate = r; });
+    Sleep(300);
+    const float silentPeak = peak;
+    PlayTone(1000);
+    const size_t count = packets;
+    const std::wstring name = capture.DeviceName();
+    capture.Stop();
+    CHECK(rate == 48000);
+    CHECK(silentPeak < 0.001f);   // nothing played yet: silence flowed
+    CHECK(peak > 0.02f);          // the tone was heard
+    CHECK(count >= 100);          // about 1.3 s of 10 ms packets
+    CHECK(!name.empty());
+}
+
+TEST(SkipsAnAppThatIsNotRunning) {
+    CaptureSource source;
+    source.appExe = L"no-such-program-for-lazo.exe";
+    std::atomic<size_t> packets{0};
+    Capture capture;
+    capture.Start(source, [&](const int16_t*, size_t) { ++packets; }, nullptr);
+    Sleep(300);
+    CHECK(capture.IsRunning() && capture.DeviceName().empty() && packets == 0);
+    capture.Stop();
 }
 
 TEST(ListsOutputs) {

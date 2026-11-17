@@ -15,23 +15,25 @@ Watching a video on a desktop PC without Bluetooth? Open Lazo, scan its QR code 
 ## 🚀 Features
 
 - 🔊 **Everything the PC plays**: Lazo records what goes to your speakers (or any output you choose) and sends it to the other device, in stereo
+- 🎯 **Or just one app**: send only the browser with your video, without notifications, calls or system sounds (Windows 10 2004 or newer)
 - 📷 **Scan and listen**: a QR code with the PC's address; any phone camera opens it, in Safari on iPhone or Chrome on Android. On a laptop or tablet, open the link
 - ⏱️ **Low delay, clean sound**
-  - Around 80 ms of buffer by default, adjustable on the listening device from 40 to 300 ms (less delay ↔ more stable)
+  - **Automatic buffer**: starts at 80 ms, goes down while all goes well (to 40 ms on a good network) and up after a dropout. Or set it yourself from 40 to 300 ms
   - Plays as one continuous stream, so there's no crackle between packets
   - Follows the small clock difference between the PC and the listening device by speeding up or slowing down imperceptibly (±0.3 %), never by dropping audio
   - Silence keeps flowing while nothing plays, so the sound starts instantly when it comes back
-- 📊 **Live status on the listening device**: connection, buffer, dropouts and skips, and a level meter
+- 📊 **Live status on the listening device**: estimated delay, buffer, dropouts and skips, and a level meter
+- 🔉 **Volume and data saver on the listening device**: its own volume, and a mono stream that uses a quarter of the data for weak Wi-Fi
 - 🔇 **Mute this PC while a device listens** (optional): the speakers go quiet and the other device still gets the sound
-- 📱 **Several devices at once**, each listed in Lazo's window with how long it has been listening
+- 📱 **Several devices at once**, each listed in Lazo's window with its delay and any dropouts; the tray icon shows a green dot while someone listens
 - 🔁 **Follows your outputs**: switch the default speakers in Windows and Lazo follows at once; unplugged devices are picked up again when they come back
 - 🔒 **Private by design**
   - Every connection needs the secret key in the QR code. **New link** changes it at once
   - Only devices on your private network (home Wi-Fi) can connect, and only Lazo's own page can open the audio stream
   - Optionally pauses after 15, 30 or 60 minutes with nobody listening
   - The PC's sound is only recorded while a device is listening
-- 🏠 **Add the page to your home screen**: the link stays the same, so it opens in one tap next time
-- 🌐 Changed Wi-Fi? Lazo notices and shows the new address
+- 🏠 **A link that lasts**: it uses the PC's name (`lazo-<your-pc>.local`) instead of its IP, so a page saved to your home screen keeps working when the router gives the PC another address
+- 🌐 Changed Wi-Fi? Lazo notices and listens on the new network
 - 🌙 Clean Windows 11 look that follows your light or dark theme and accent color; the listening page follows the device's theme too
 - 🪶 Tiny: a ~0.7 MB program, a ~2.3 MB installer, no .NET or Visual C++ runtime needed
 
@@ -57,7 +59,9 @@ Uninstalling (Settings → Apps) removes Lazo, its startup entry and its setting
 | --- | --- |
 | Listen on a phone | Open Lazo, scan the QR code with the phone's camera, tap **Listen** |
 | Listen on a laptop or tablet | Open the link shown in Lazo (**Copy link**) in its browser, click **Listen** |
-| Less delay or fewer dropouts | Move the **Buffer** slider on the listening device (left: less delay, right: more stable) |
+| Less delay or fewer dropouts | Leave **Automatic buffer** on, or turn it off and move the **Buffer** slider (left: less delay, right: more stable) |
+| Weak Wi-Fi | Turn on **Data saver** on the listening device |
+| Send only one app | **Settings** → **Send the sound of** → pick the app under **Only one app** |
 | Copy the link | **Copy link** in the window, or right-click the tray icon → **Copy link** |
 | Stop old links from working | **New link** (devices must use the new code or link) |
 | Pause or resume streaming | **Pause streaming** in the window, or from the tray icon's menu |
@@ -70,10 +74,11 @@ Uninstalling (Settings → Apps) removes Lazo, its startup entry and its setting
 
 ### ⚙️ Settings
 
-- **Send the sound of**: the default output (follows Windows) or a specific one
+- **Send the sound of**: the default output (follows Windows), a specific output, or only one app (the apps that have played sound are listed)
 - **Mute this PC while a device listens**
 - **Port**: 8765 by default; if it's taken, Lazo tries the next ones
 - **Pause when nobody listens**: never, or after 15, 30 or 60 minutes
+- **Stable link**: the link uses the PC's name rather than its IP. Turn it off if a device can't open `.local` addresses (some older Android phones)
 - **Notify when a device connects**
 - **Start with Windows**
 
@@ -121,6 +126,7 @@ See [third-party notices](THIRD-PARTY-NOTICES.md) for licenses.
 
 Windows 10 (version 1809 or newer) and Windows 11, 64-bit.  
 Listening devices: Safari on iPhone and iPad (iOS 15 or newer), Chrome on Android, or any current browser on a laptop or PC on the same network.
+Sending a single app needs Windows 10 version 2004 or newer.
 
 ---
 

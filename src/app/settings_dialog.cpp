@@ -21,6 +21,7 @@ enum ControlId {
     kMuteToggle,
     kPortEdit,
     kIdleButton,
+    kStableToggle,
     kNotifyToggle,
     kAutostartToggle,
     kCancel = IDCANCEL,
@@ -48,6 +49,8 @@ struct State {
     HWND window = nullptr;
     Settings settings;
     std::vector<OutputDevice> outputs;
+    std::vector<AudioApp> apps;
+    bool appsSupported = false;
     ApplySettings apply;
     bool autostart = false;
     std::wstring status;
@@ -70,6 +73,9 @@ HWND openWindow = nullptr;
 int Scale(HWND window, int value) { return MulDiv(value, GetDpiForWindow(window), 96); }
 
 std::wstring OutputLabel(const State& state) {
+    if (state.appsSupported && !state.settings.appExe.empty()) {
+        return state.settings.appName.empty() ? state.settings.appExe : state.settings.appName;
+    }
     if (state.settings.outputId.empty()) return L"Default output";
     for (const auto& output : state.outputs) {
         if (output.id == state.settings.outputId) return output.name;
@@ -145,6 +151,8 @@ void Layout(State& state) {
           portWidth - scale(20), editHeight);
     y += row;
     labelRow(y, L"Pause when nobody listens", kIdleButton, fieldWidth, fieldHeight);
+    y += row;
+    labelRow(y, L"Stable link (uses this PC's name)", kStableToggle, scale(44), scale(20));
     y += row;
     text(padding, y, width - 2 * padding, scale(20),
          L"Allow Lazo on private networks if Windows Firewall asks.", TextStyle::Hint);
@@ -270,6 +278,7 @@ void DrawControl(State& state, const DRAWITEMSTRUCT& item) {
         case kOutputButton: DrawChoice(state, item, OutputLabel(state)); break;
         case kIdleButton: DrawChoice(state, item, IdleLabel(state.settings.idleStopMinutes)); break;
         case kMuteToggle: DrawToggle(state, item, state.settings.muteSpeakers); break;
+        case kStableToggle: DrawToggle(state, item, state.settings.stableLink); break;
         case kNotifyToggle: DrawToggle(state, item, state.settings.notifyConnections); break;
         case kAutostartToggle: DrawToggle(state, item, state.autostart); break;
         case kSave: DrawButton(item, state.theme, fonts, ButtonStyle::Primary, nullptr, L"Save", radius); break;
@@ -297,10 +306,17 @@ void Save(State& state) {
 }
 
 // A menu under the field; returns the chosen index or -1.
+// An empty label is a separator; one starting with '#' a grayed heading.
 int ChooseFromMenu(State& state, int fieldId, const std::vector<std::wstring>& labels, int checked) {
     HMENU menu = CreatePopupMenu();
     for (size_t i = 0; i < labels.size(); ++i) {
-        AppendMenuW(menu, MF_STRING | (static_cast<int>(i) == checked ? MF_CHECKED : 0), i + 1, labels[i].c_str());
+        if (labels[i].empty()) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        } else if (labels[i][0] == L'#') {
+            AppendMenuW(menu, MF_STRING | MF_GRAYED, i + 1, labels[i].c_str() + 1);
+        } else {
+            AppendMenuW(menu, MF_STRING | (static_cast<int>(i) == checked ? MF_CHECKED : 0), i + 1, labels[i].c_str());
+        }
     }
     RECT field;
     GetWindowRect(GetDlgItem(state.window, fieldId), &field);
@@ -310,16 +326,42 @@ int ChooseFromMenu(State& state, int fieldId, const std::vector<std::wstring>& l
     return chosen - 1;
 }
 
+// Everything an output plays, or a single application.
 void ChooseOutput(State& state) {
-    std::vector<std::wstring> labels{L"Default output (follows Windows)"};
-    int checked = state.settings.outputId.empty() ? 0 : -1;
+    const bool appChosen = state.appsSupported && !state.settings.appExe.empty();
+    std::vector<std::wstring> labels{L"#Everything this PC plays on", L"Default output (follows Windows)"};
+    int checked = !appChosen && state.settings.outputId.empty() ? 1 : -1;
+    const size_t firstOutput = labels.size();
     for (size_t i = 0; i < state.outputs.size(); ++i) {
+        if (!appChosen && state.outputs[i].id == state.settings.outputId) checked = static_cast<int>(labels.size());
         labels.push_back(state.outputs[i].name);
-        if (state.outputs[i].id == state.settings.outputId) checked = static_cast<int>(i) + 1;
+    }
+    // The applications that have played sound, plus the chosen one if closed.
+    std::vector<AudioApp> apps = state.apps;
+    if (appChosen && std::none_of(apps.begin(), apps.end(), [&](const AudioApp& app) { return app.exe == state.settings.appExe; })) {
+        apps.insert(apps.begin(), {state.settings.appExe, state.settings.appName.empty() ? state.settings.appExe : state.settings.appName});
+    }
+    size_t firstApp = 0;
+    if (state.appsSupported) {
+        labels.push_back(L"");
+        labels.push_back(apps.empty() ? L"#Only one app: none is playing sound now" : L"#Only one app");
+        firstApp = labels.size();
+        for (const auto& app : apps) {
+            if (appChosen && app.exe == state.settings.appExe) checked = static_cast<int>(labels.size());
+            labels.push_back(app.name);
+        }
     }
     const int chosen = ChooseFromMenu(state, kOutputButton, labels, checked);
-    if (chosen < 0) return;
-    state.settings.outputId = chosen == 0 ? std::wstring() : state.outputs[static_cast<size_t>(chosen) - 1].id;
+    if (chosen < 1) return;
+    const size_t index = static_cast<size_t>(chosen);
+    if (state.appsSupported && index >= firstApp) {
+        state.settings.appExe = apps[index - firstApp].exe;
+        state.settings.appName = apps[index - firstApp].name;
+    } else if (index == 1 || (index >= firstOutput && index < firstOutput + state.outputs.size())) {
+        state.settings.appExe.clear();
+        state.settings.appName.clear();
+        state.settings.outputId = index == 1 ? std::wstring() : state.outputs[index - firstOutput].id;
+    }
     InvalidateRect(GetDlgItem(state.window, kOutputButton), nullptr, FALSE);
 }
 
@@ -357,6 +399,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 case kOutputButton: ChooseOutput(*state); break;
                 case kIdleButton: ChooseIdle(*state); break;
                 case kMuteToggle: toggle(state->settings.muteSpeakers); break;
+                case kStableToggle: toggle(state->settings.stableLink); break;
                 case kNotifyToggle: toggle(state->settings.notifyConnections); break;
                 case kAutostartToggle: toggle(state->autostart); break;
                 case kPortEdit:
@@ -404,7 +447,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 }  // namespace
 
 void ShowSettingsDialog(HINSTANCE instance, HWND owner, const Settings& current, const std::vector<OutputDevice>& outputs,
-                        const ApplySettings& apply) {
+                        const std::vector<AudioApp>& apps, bool appsSupported, const ApplySettings& apply) {
     if (openWindow) {
         SetForegroundWindow(openWindow);
         return;
@@ -423,6 +466,8 @@ void ShowSettingsDialog(HINSTANCE instance, HWND owner, const Settings& current,
     State state;
     state.settings = current;
     state.outputs = outputs;
+    state.apps = apps;
+    state.appsSupported = appsSupported;
     state.apply = apply;
     state.autostart = IsAutostartEnabled();
 
@@ -452,6 +497,7 @@ void ShowSettingsDialog(HINSTANCE instance, HWND owner, const Settings& current,
                                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPortEdit)), instance, nullptr);
     SendMessageW(port, EM_LIMITTEXT, 5, 0);
     add(kIdleButton);
+    add(kStableToggle);
     add(kNotifyToggle);
     add(kAutostartToggle);
     add(kCancel);

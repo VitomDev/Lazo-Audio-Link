@@ -147,12 +147,17 @@ void Server::Stop() {
     idle_.wait(lock, [this] { return connections_.empty(); });
 }
 
-std::wstring Server::Url() const {
-    return L"http://" + FormatIPv4(options_.address) + L":" + std::to_wstring(port_) + L"/?t=" + FromUtf8(options_.token);
+std::wstring Server::Address() const {
+    const std::wstring host = options_.hostName.empty() ? FormatIPv4(options_.address) : FromUtf8(options_.hostName);
+    return L"http://" + host + L":" + std::to_wstring(port_);
 }
 
-std::string Server::ConfigFrame() const {
-    return websocket::EncodeFrame(websocket::kText, StreamConfigJson(rate_, framesPerPacket_, options_.pcName));
+std::wstring Server::Url() const { return Address() + L"/?t=" + FromUtf8(options_.token); }
+
+std::string Server::ConfigFrame(bool saver) const {
+    const std::string json = saver ? StreamConfigJson(rate_ / 2, 1, framesPerPacket_ / 2, options_.pcName)
+                                   : StreamConfigJson(rate_, 2, framesPerPacket_, options_.pcName);
+    return websocket::EncodeFrame(websocket::kText, json);
 }
 
 void Server::SetFormat(uint32_t rate, size_t framesPerPacket) {
@@ -160,12 +165,15 @@ void Server::SetFormat(uint32_t rate, size_t framesPerPacket) {
     const bool changed = rate != rate_ || framesPerPacket != framesPerPacket_;
     rate_ = rate;
     framesPerPacket_ = framesPerPacket;
-    const auto frame = std::make_shared<const std::string>(ConfigFrame());
+    if (changed) saverDownsampler_.Reset();
+    const auto full = std::make_shared<const std::string>(ConfigFrame(false));
+    const auto saver = std::make_shared<const std::string>(ConfigFrame(true));
     for (const auto& client : clients_) {
         std::lock_guard clientLock(client->mutex);
         // The page starts over on every format message: only send what is new.
         if (client->configured && !changed) continue;
         client->configured = true;
+        const auto& frame = client->info.saver ? saver : full;
         client->queue.push_back(frame);
         client->queuedBytes += frame->size();
         client->wake.notify_all();
@@ -177,10 +185,22 @@ void Server::Broadcast(const int16_t* stereo, size_t frames) {
     if (clients_.empty()) return;
     // x64 is little-endian, the byte order the page reads.
     const std::string_view payload(reinterpret_cast<const char*>(stereo), frames * 2 * sizeof(int16_t));
-    const auto frame = std::make_shared<const std::string>(websocket::EncodeFrame(websocket::kBinary, payload));
+    const auto full = std::make_shared<const std::string>(websocket::EncodeFrame(websocket::kBinary, payload));
+    // The data saver stream is only made while someone wants it; its filter
+    // keeps running between packets so the sound stays continuous.
+    std::shared_ptr<const std::string> saver;
+    const bool anySaver = std::any_of(clients_.begin(), clients_.end(), [](const auto& client) { return client->info.saver; });
+    if (anySaver) {
+        saverSamples_.clear();
+        saverDownsampler_.Process(stereo, frames, saverSamples_);
+        saver = std::make_shared<const std::string>(websocket::EncodeFrame(
+            websocket::kBinary,
+            std::string_view(reinterpret_cast<const char*>(saverSamples_.data()), saverSamples_.size() * sizeof(int16_t))));
+    }
     for (const auto& client : clients_) {
         std::lock_guard clientLock(client->mutex);
         if (!client->configured || client->closing) continue;
+        const auto& frame = client->info.saver ? saver : full;
         if (client->queuedBytes + frame->size() > kMaxQueuedBytes) {
             ++client->info.dropped;
             continue;
@@ -330,9 +350,13 @@ void Server::ServeWebSocket(SOCKET socket, const RequestHead& request, uint32_t 
         client->info.device = DeviceNameFromUserAgent(request.userAgent);
         client->info.address = peer;
         client->info.since = GetTickCount64();
+        client->info.saver = QueryParam(request.query, "q").value_or("") == "saver";
+        if (client->info.saver && std::none_of(clients_.begin(), clients_.end(), [](const auto& other) { return other->info.saver; })) {
+            saverDownsampler_.Reset();
+        }
         if (rate_) {
             client->configured = true;
-            const auto frame = std::make_shared<const std::string>(ConfigFrame());
+            const auto frame = std::make_shared<const std::string>(ConfigFrame(client->info.saver));
             client->queue.push_back(frame);
             client->queuedBytes = frame->size();
         }
@@ -394,6 +418,13 @@ void Server::ServeWebSocket(SOCKET socket, const RequestHead& request, uint32_t 
                 SendAll(socket, reply.data(), reply.size());
                 open = false;
                 break;
+            }
+            if (frame.opcode == websocket::kText) {
+                if (const auto stats = ParseListenerStats(frame.payload)) {
+                    std::lock_guard lock(client->mutex);
+                    client->info.stats = *stats;
+                    client->info.hasStats = true;
+                }
             }
             if (frame.opcode == websocket::kPing) {
                 const std::string reply = websocket::EncodeFrame(websocket::kPong, frame.payload);

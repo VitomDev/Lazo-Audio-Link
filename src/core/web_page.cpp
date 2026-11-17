@@ -68,6 +68,16 @@ p { margin: 0; }
 .notes { display: flex; flex-direction: column; gap: 8px; padding: 0 4px; }
 .notes p { display: flex; gap: 10px; }
 .notes p::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 3px; background: var(--muted); margin-top: 8px; }
+.switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-weight: 600; margin: 0; }
+.switch small { display: block; font-weight: normal; font-size: 13px; color: var(--muted); }
+.switch input { -webkit-appearance: none; appearance: none; flex: none; width: 46px; height: 28px; border-radius: 14px;
+                background: var(--track); position: relative; margin: 0; cursor: pointer; transition: background .15s; }
+.switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 11px;
+                       background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: left .15s; }
+.switch input:checked { background: var(--accent); }
+.switch input:checked::after { left: 21px; }
+.gap { height: 1px; background: var(--line); margin: 14px 0; }
+input[type=range]:disabled { opacity: .45; }
 #expired { display: none; border-color: var(--bad); }
 #expired p { color: var(--bad); }
 </style>
@@ -89,20 +99,32 @@ p { margin: 0; }
 
   <section>
     <div class="row"><span>Status</span><span id="status">Stopped</span></div>
+    <div class="row"><span>Delay</span><span id="delay">–</span></div>
     <div class="row"><span>Buffer</span><span id="buf">–</span></div>
     <div class="row"><span>Dropouts / skips</span><span id="glitch">0 / 0</span></div>
     <div id="meter"><div></div></div>
   </section>
 
   <section>
+    <label for="volume">Volume <b><span id="volumeVal">100</span> %</b></label>
+    <input id="volume" type="range" min="0" max="100" step="1" value="100">
+    <div class="gap"></div>
+    <label class="switch" for="saver"><span>Data saver<small>Mono, a quarter of the data. For weak Wi-Fi.</small></span>
+      <input id="saver" type="checkbox" aria-label="Data saver"></label>
+  </section>
+
+  <section>
+    <label class="switch" for="auto"><span>Automatic buffer<small>As little delay as your network allows.</small></span>
+      <input id="auto" type="checkbox" checked aria-label="Automatic buffer"></label>
+    <div class="gap"></div>
     <label for="target">Buffer <b><span id="targetVal">80</span> ms</b></label>
     <input id="target" type="range" min="40" max="300" step="10" value="80">
     <div class="ends"><span>Less delay</span><span>More stable</span></div>
-    <p class="hint" style="margin-top:10px">If you hear dropouts, move it to the right.</p>
+    <p class="hint" style="margin-top:10px" id="bufferHint">Lazo raises it after a dropout and lowers it again while all goes well.</p>
   </section>
 
   <div class="notes hint">
-    <p>Bluetooth headphones add their own delay on top of the buffer.</p>
+    <p>Bluetooth headphones add their own delay (often 100–200 ms) on top of what Lazo shows.</p>
     <p>Add this page to your home screen to open it in one tap next time.</p>
   </div>
 </main>
@@ -113,7 +135,15 @@ const $ = s => document.querySelector(s);
 let ctx = null, ws = null, node = null, running = false, failures = 0, retry = 0;
 let rate = 48000, channels = 2;
 let underruns = 0, skips = 0, level = 0;
-let target = Math.min(0.3, Math.max(0.04, +storageGet('lazo.target', 80) / 1000));
+const MIN_TARGET = 0.04, MAX_TARGET = 0.3;
+let manualTarget = Math.min(MAX_TARGET, Math.max(MIN_TARGET, +storageGet('lazo.target', 80) / 1000));
+let autoBuffer = storageGet('lazo.auto', '1') !== '0';
+let target = autoBuffer ? 0.08 : manualTarget;
+let volume = Math.min(1, Math.max(0, +storageGet('lazo.volume', 100) / 100));
+let saver = storageGet('lazo.saver', '0') === '1';
+// Automatic buffer: up 20 ms after a dropout, down 10 ms after every 20 s
+// without one, never below what dropped out in the last 5 minutes.
+let calmSince = 0, floor = MIN_TARGET, floorUntil = 0;
 
 // One continuous ring buffer: packets from the network are written into it
 // and a single audio node reads it without pause. Playing every packet as
@@ -128,12 +158,43 @@ let buffering = true, fadeIn = 0, avgFill = 0;
 function storageGet(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } }
 function storageSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
 
-$('#target').value = Math.round(target * 1000);
-$('#targetVal').textContent = Math.round(target * 1000);
+function showTarget() {
+  $('#target').value = Math.round(target * 1000);
+  $('#targetVal').textContent = Math.round(target * 1000);
+  $('#target').disabled = autoBuffer;
+  $('#bufferHint').textContent = autoBuffer
+    ? 'Lazo raises it after a dropout and lowers it again while all goes well.'
+    : 'If you hear dropouts, move it to the right.';
+}
+$('#auto').checked = autoBuffer;
+$('#auto').onchange = e => {
+  autoBuffer = e.target.checked;
+  storageSet('lazo.auto', autoBuffer ? '1' : '0');
+  if (!autoBuffer) target = manualTarget;
+  calmSince = performance.now();
+  showTarget();
+};
 $('#target').oninput = e => {
-  target = e.target.value / 1000;
+  target = manualTarget = e.target.value / 1000;
   $('#targetVal').textContent = e.target.value;
   storageSet('lazo.target', e.target.value);
+};
+showTarget();
+
+$('#volume').value = Math.round(volume * 100);
+$('#volumeVal').textContent = Math.round(volume * 100);
+$('#volume').oninput = e => {
+  volume = e.target.value / 100;
+  $('#volumeVal').textContent = e.target.value;
+  storageSet('lazo.volume', e.target.value);
+};
+
+$('#saver').checked = saver;
+$('#saver').onchange = e => {
+  saver = e.target.checked;
+  storageSet('lazo.saver', saver ? '1' : '0');
+  // The PC sends the other stream on a new connection.
+  if (running && ws) { const old = ws; ws = null; old.onclose = null; old.close(); connect(); }
 };
 
 function setStatus(text, cls = '') { const s = $('#status'); s.textContent = text; s.className = cls; }
@@ -191,7 +252,7 @@ function stop() {
 function connect() {
   if (!running) return;
   setStatus(failures ? 'Reconnecting…' : 'Connecting…', failures ? 'bad' : '');
-  const socket = new WebSocket(`ws://${location.host}/ws${location.search}`);
+  const socket = new WebSocket(`ws://${location.host}/ws${location.search}${saver ? '&q=saver' : ''}`);
   ws = socket;
   socket.binaryType = 'arraybuffer';
   socket.onmessage = e => {
@@ -201,6 +262,8 @@ function connect() {
       if (cfg.pc) $('#from').textContent = 'Audio from ' + cfg.pc;
       resetRing();
       failures = 0;
+      // Counted per connection, as the PC shows them.
+      underruns = 0; skips = 0;
       setStatus('Listening', 'ok');
       return;
     }
@@ -265,6 +328,10 @@ function render(e) {
 
   if (fill < N * step + 2) {          // ran dry: silence, then fill up again
     underruns++; buffering = true;
+    if (autoBuffer) {
+      target = Math.min(MAX_TARGET, target + 0.02);
+      floor = target; floorUntil = performance.now() + 300000; calmSince = performance.now();
+    }
     L.fill(0); R.fill(0); return;
   }
 
@@ -277,6 +344,7 @@ function render(e) {
     let l = ring[a] + (ring[b] - ring[a]) * f;
     let r = ch > 1 ? ring[a + 1] + (ring[b + 1] - ring[a + 1]) * f : l;
     if (fadeIn < 256) { const g = fadeIn++ / 256; l *= g; r *= g; }
+    l *= volume; r *= volume;
     L[i] = l; R[i] = r;
     pos += step;
   }
@@ -288,11 +356,28 @@ document.addEventListener('visibilitychange', () => {
   if (running && ctx && !document.hidden && ctx.state !== 'running') ctx.resume();
 });
 
+// The PC's own share of the delay: a 10 ms packet plus capture and network.
+const PC_DELAY_MS = 15;
+let lastStats = 0;
 setInterval(() => {
-  if (!running || !ctx) { $('#meter div').style.width = '0%'; return; }
+  if (!running || !ctx) { $('#meter div').style.width = '0%'; $('#delay').textContent = '–'; return; }
+  const now = performance.now();
+  if (autoBuffer && !buffering && now - calmSince > 20000) {
+    calmSince = now;
+    const lowest = now < floorUntil ? floor : MIN_TARGET;
+    if (target - 0.01 >= lowest - 1e-9) { target = Math.max(MIN_TARGET, target - 0.01); showTarget(); }
+  }
+  if (autoBuffer && +$('#target').value !== Math.round(target * 1000)) showTarget();
   const ahead = Math.max(0, (written - readPos) / rate) * 1000;
   const out = ((ctx.outputLatency || 0) + (ctx.baseLatency || 0)) * 1000;
+  const connected = $('#status').textContent === 'Listening';
+  $('#delay').textContent = connected ? `\u2248 ${(ahead + out + PC_DELAY_MS).toFixed(0)} ms` : '–';
   $('#buf').textContent = `${ahead.toFixed(0)} ms` + (out ? ` + ${out.toFixed(0)} ms output` : '');
+  // The PC shows each listener's delay and dropouts.
+  if (connected && ws && ws.readyState === 1 && now - lastStats > 2000) {
+    lastStats = now;
+    ws.send(JSON.stringify({ buffer: Math.round(ahead), output: Math.round(out), dropouts: underruns, skips }));
+  }
   $('#glitch').textContent = `${underruns} / ${skips}`;
   $('#meter div').style.width = Math.min(100, level * 100) + '%';
   level *= 0.9;

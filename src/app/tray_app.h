@@ -2,6 +2,7 @@
 
 #include "app/main_window.h"
 #include "core/audio.h"
+#include "core/mdns.h"
 #include "core/server.h"
 #include "core/settings.h"
 
@@ -32,6 +33,8 @@ private:
 
     void AddTrayIcon();
     void UpdateTrayTip();
+    // The icon shows a green dot while a device listens.
+    void UpdateTrayIcon();
     void ShowTrayMenu(POINT point);
     void Notify(const std::wstring& message);
 
@@ -52,6 +55,7 @@ private:
     void Exit();
 
     ViewState View() const;
+    CaptureSource Source() const;
 
     HINSTANCE instance_ = nullptr;
     HWND window_ = nullptr;
@@ -63,6 +67,11 @@ private:
     Settings settings_;
     Server server_;
     Capture capture_;
+    MdnsResponder mdns_;
+    std::string hostLabel_;  // lazo-<pc>, the stable link's name
+    HICON idleIcon_ = nullptr;
+    HICON liveIcon_ = nullptr;
+    bool showingLive_ = false;
     MainWindow mainWindow_;
     std::string touchIcon_;
     std::wstring pcName_;

@@ -50,6 +50,16 @@ bool TokensEqual(std::string_view a, std::string_view b);
 bool IsPrivateIPv4(uint32_t address);
 std::wstring FormatIPv4(uint32_t address);
 
+// What the page reports every few seconds over its WebSocket.
+struct ListenerStats {
+    int bufferMs = 0;   // audio waiting in the page's buffer
+    int outputMs = 0;   // the browser's own output latency
+    int dropouts = 0;
+    int skips = 0;
+};
+// {"buffer":93,"output":50,"dropouts":0,"skips":0}; unknown keys are ignored.
+std::optional<ListenerStats> ParseListenerStats(std::string_view json);
+
 // "iPhone", "Android phone"... a short name for the PC window, from the
 // browser's User-Agent.
 std::wstring DeviceNameFromUserAgent(std::string_view userAgent);

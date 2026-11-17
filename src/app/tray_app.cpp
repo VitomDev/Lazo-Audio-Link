@@ -12,6 +12,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace lazo {
 
@@ -53,6 +54,55 @@ std::string LoadTouchIcon(HINSTANCE instance) {
     return std::string(static_cast<const char*>(data), SizeofResource(instance, resource));
 }
 
+// The app icon with a green dot in its lower right corner.
+HICON CreateLiveIcon(HICON base, int size) {
+    BITMAPINFO info{};
+    info.bmiHeader = {sizeof(BITMAPINFOHEADER), size, -size, 1, 32, BI_RGB};
+    void* bits = nullptr;
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    HBITMAP color = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!color) {
+        DeleteDC(dc);
+        return nullptr;
+    }
+    HGDIOBJ previous = SelectObject(dc, color);
+    DrawIconEx(dc, 0, 0, base, size, size, 0, nullptr, DI_NORMAL);
+    SelectObject(dc, previous);
+    DeleteDC(dc);
+
+    // Premultiplied BGRA; a white ring around the dot keeps it apart from the logo.
+    auto* pixels = static_cast<uint32_t*>(bits);
+    const float radius = size * 0.24f;
+    const float ring = std::max(1.0f, size * 0.07f);
+    const float cx = size - radius - 0.5f;
+    const float cy = size - radius - 0.5f;
+    const auto blend = [](uint32_t under, uint32_t r, uint32_t g, uint32_t b, float alpha) {
+        const auto channel = [&](int shift, uint32_t value) {
+            const float u = static_cast<float>((under >> shift) & 0xFF);
+            return static_cast<uint32_t>(u * (1 - alpha) + value * alpha + 0.5f) << shift;
+        };
+        return channel(24, 255) | channel(16, r) | channel(8, g) | channel(0, b);
+    };
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const float distance = std::hypot(x + 0.5f - cx - 0.5f, y + 0.5f - cy - 0.5f);
+            uint32_t& pixel = pixels[y * size + x];
+            const float outer = std::clamp(radius + ring - distance + 0.5f, 0.0f, 1.0f);
+            if (outer > 0) pixel = blend(pixel, 255, 255, 255, outer);
+            const float inner = std::clamp(radius - distance + 0.5f, 0.0f, 1.0f);
+            if (inner > 0) pixel = blend(pixel, 40, 180, 90, inner);
+        }
+    }
+    HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
+    ICONINFO icon{TRUE, 0, 0, mask, color};
+    HICON result = CreateIconIndirect(&icon);
+    DeleteObject(mask);
+    DeleteObject(color);
+    return result;
+}
+
 bool CopyToClipboard(HWND owner, const std::wstring& text) {
     if (!OpenClipboard(owner)) return false;
     EmptyClipboard();
@@ -89,6 +139,7 @@ bool TrayApp::Initialize(HINSTANCE instance, bool startedInBackground) {
     }
     touchIcon_ = LoadTouchIcon(instance);
     pcName_ = ComputerName();
+    hostLabel_ = LinkHostLabel(pcName_);
 
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = WindowProc;
@@ -134,7 +185,12 @@ void TrayApp::AddTrayIcon() {
     icon_.uID = 1;
     icon_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     icon_.uCallbackMessage = WM_APP_TRAY;
-    LoadIconMetric(instance_, MAKEINTRESOURCEW(IDI_LAZO), LIM_SMALL, &icon_.hIcon);
+    if (!idleIcon_) {
+        LoadIconMetric(instance_, MAKEINTRESOURCEW(IDI_LAZO), LIM_SMALL, &idleIcon_);
+        liveIcon_ = CreateLiveIcon(idleIcon_, GetSystemMetrics(SM_CXSMICON));
+    }
+    showingLive_ = !listeners_.empty() && liveIcon_;
+    icon_.hIcon = showingLive_ ? liveIcon_ : idleIcon_;
     wcscpy_s(icon_.szTip, L"Lazo Audio Link");
     vitool_tray::NotifyIcon(NIM_ADD, &icon_);
     icon_.uVersion = NOTIFYICON_VERSION_4;
@@ -161,6 +217,16 @@ void TrayApp::UpdateTrayTip() {
     wcsncpy_s(icon_.szTip, tip.c_str(), _TRUNCATE);
     NOTIFYICONDATAW data = icon_;
     data.uFlags = NIF_TIP | NIF_SHOWTIP;
+    vitool_tray::NotifyIcon(NIM_MODIFY, &data);
+}
+
+void TrayApp::UpdateTrayIcon() {
+    const bool live = !listeners_.empty() && liveIcon_;
+    if (live == showingLive_) return;
+    showingLive_ = live;
+    icon_.hIcon = live ? liveIcon_ : idleIcon_;
+    NOTIFYICONDATAW data = icon_;
+    data.uFlags = NIF_ICON;
     vitool_tray::NotifyIcon(NIM_MODIFY, &data);
 }
 
@@ -213,6 +279,7 @@ void TrayApp::Notify(const std::wstring& message) {
 void TrayApp::StartServer() {
     capture_.Stop();
     server_.Stop();
+    mdns_.Stop();
     listeners_.clear();
     const auto address = FindLocalAddress();
     lastNetworkCheck_ = GetTickCount64();
@@ -226,20 +293,28 @@ void TrayApp::StartServer() {
         options.token = settings_.token;
         options.pcName = pcName_;
         options.touchIcon = touchIcon_;
+        // The stable link: the PC answers its own .local name, so a saved
+        // link survives a new IP. Without the responder, the IP it is.
+        const std::string host = hostLabel_ + ".local";
+        if (settings_.stableLink && mdns_.Start(host, address_)) options.hostName = host;
         state_ = server_.Start(options) ? StreamState::Streaming : StreamState::PortBusy;
+        if (state_ != StreamState::Streaming) mdns_.Stop();
     }
     UpdateMute();
     UpdateTrayTip();
+    UpdateTrayIcon();
     mainWindow_.Refresh();
 }
 
 void TrayApp::PauseServer(StreamState reason) {
     capture_.Stop();
     server_.Stop();
+    mdns_.Stop();
     listeners_.clear();
     state_ = reason;
     UpdateMute();
     UpdateTrayTip();
+    UpdateTrayIcon();
     mainWindow_.Refresh();
 }
 
@@ -290,22 +365,37 @@ void TrayApp::OnListenersChanged() {
     // The output is only recorded while someone listens.
     if (!listeners_.empty() && !capture_.IsRunning()) {
         capture_.Start(
-            settings_.outputId, [this](const int16_t* stereo, size_t frames) { server_.Broadcast(stereo, frames); },
+            Source(), [this](const int16_t* stereo, size_t frames) { server_.Broadcast(stereo, frames); },
             [this](uint32_t rate, size_t framesPerPacket) { server_.SetFormat(rate, framesPerPacket); });
     } else if (listeners_.empty() && capture_.IsRunning()) {
         capture_.Stop();
     }
     UpdateMute();
     UpdateTrayTip();
+    UpdateTrayIcon();
     SetTimer(window_, kTickTimer, capture_.IsRunning() ? kTickMs : kIdleTickMs, nullptr);
     mainWindow_.Refresh();
 }
 
-// The PC's speakers are muted while a phone listens, if asked, and given
+CaptureSource TrayApp::Source() const {
+    CaptureSource source;
+    source.outputId = settings_.outputId;
+    if (AppCaptureSupported()) {
+        source.appExe = settings_.appExe;
+        source.appName = settings_.appName;
+    }
+    return source;
+}
+
+// The PC's speakers are muted while a device listens, if asked, and given
 // back exactly as they were. Windows keeps sending the sound to the
-// loopback when the output is muted.
+// loopback when the output is muted. With one application, its sound is
+// muted on the default output, where applications usually play.
 void TrayApp::UpdateMute() {
-    const std::wstring wanted = settings_.muteSpeakers && capture_.IsRunning() ? capture_.DeviceId() : std::wstring();
+    std::wstring wanted;
+    if (settings_.muteSpeakers && capture_.IsRunning()) {
+        wanted = Source().appExe.empty() ? capture_.DeviceId() : DefaultOutputId();
+    }
     if (wanted == settings_.mutedOutputId) return;
     if (!wanted.empty() && IsOutputMuted(wanted)) return;  // muted by the user: leave it alone
     RestoreMute();
@@ -327,11 +417,16 @@ ViewState TrayApp::View() const {
     view.state = state_;
     if (state_ == StreamState::Streaming) {
         view.url = server_.Url();
-        view.address = L"http://" + FormatIPv4(address_) + L":" + std::to_wstring(server_.Port());
+        view.address = server_.Address();
         view.listeners = server_.Listeners();
     }
     view.output = capture_.DeviceName();
-    if (view.output.empty()) {
+    view.appSource = !Source().appExe.empty();
+    if (view.output.empty() && view.appSource) {
+        // The application is closed, or nobody listens yet.
+        view.output = settings_.appName.empty() ? settings_.appExe : settings_.appName;
+        if (capture_.IsRunning()) view.output += L" (not open)";
+    } else if (view.output.empty()) {
         // Not recording right now: show what will be recorded, looked up
         // every few seconds rather than on every repaint.
         const ULONGLONG now = GetTickCount64();
@@ -372,6 +467,7 @@ void TrayApp::CopyLink() {
 void TrayApp::OpenSettings() {
     ShowSettingsDialog(
         instance_, mainWindow_.IsVisible() ? mainWindow_.window() : nullptr, settings_, EnumerateOutputs(),
+        AppCaptureSupported() ? EnumerateAudioApps() : std::vector<AudioApp>{}, AppCaptureSupported(),
         [this](const Settings& settings, bool autostart, std::wstring& error) { return ApplySettings(settings, autostart, error); });
     mainWindow_.Refresh();
 }
@@ -385,11 +481,14 @@ bool TrayApp::ApplySettings(const Settings& settings, bool autostart, std::wstri
         error = L"Could not change Start with Windows.";
         return false;
     }
-    const bool portChanged = settings.port != settings_.port;
-    const bool outputChanged = settings.outputId != settings_.outputId;
+    const bool portChanged = settings.port != settings_.port || settings.stableLink != settings_.stableLink;
+    const bool outputChanged = settings.outputId != settings_.outputId || settings.appExe != settings_.appExe;
     // Only the choices made in the dialog; the link and the mute record stay.
     settings_.port = settings.port;
+    settings_.stableLink = settings.stableLink;
     settings_.outputId = settings.outputId;
+    settings_.appExe = settings.appExe;
+    settings_.appName = settings.appName;
     settings_.idleStopMinutes = settings.idleStopMinutes;
     settings_.muteSpeakers = settings.muteSpeakers;
     settings_.notifyConnections = settings.notifyConnections;
@@ -419,10 +518,13 @@ void TrayApp::Exit() {
     KillTimer(window_, kTickTimer);
     capture_.Stop();
     server_.Stop();
+    mdns_.Stop();
     RestoreMute();
     mainWindow_.Destroy();
     vitool_tray::NotifyIcon(NIM_DELETE, &icon_);
-    if (icon_.hIcon) DestroyIcon(icon_.hIcon);
+    if (idleIcon_) DestroyIcon(idleIcon_);
+    if (liveIcon_) DestroyIcon(liveIcon_);
+    idleIcon_ = liveIcon_ = nullptr;
     DestroyWindow(window_);
 }
 

@@ -28,7 +28,8 @@ struct ViewState {
     std::wstring url;      // the phone's link, while streaming
     std::wstring address;  // http://192.168.1.20:8765
     std::vector<Listener> listeners;
-    std::wstring output;  // the output whose sound is sent
+    std::wstring output;  // the output or application whose sound is sent
+    bool appSource = false;
     float level = 0.0f;
     bool speakersMuted = false;
     int port = 0;

@@ -21,6 +21,8 @@ constexpr int kMargin = 24;
 constexpr int kQrSize = 232;
 constexpr int kButtonHeight = 32;
 constexpr int kMaxListenerRows = 3;
+// The PC's share of the delay: a 10 ms packet plus capture and network.
+constexpr int kPcDelayMs = 15;
 
 enum ControlId {
     kCopyLink = 101,
@@ -178,7 +180,10 @@ void MainWindow::Refresh() {
                              next.output != view_.output || next.speakersMuted != view_.speakersMuted;
     bool listenersChanged = layoutChanged;
     for (size_t i = 0; !listenersChanged && i < next.listeners.size(); ++i) {
-        listenersChanged = next.listeners[i].id != view_.listeners[i].id;
+        const Listener& a = next.listeners[i];
+        const Listener& b = view_.listeners[i];
+        listenersChanged = a.id != b.id || a.hasStats != b.hasStats || a.stats.bufferMs != b.stats.bufferMs ||
+                           a.stats.outputMs != b.stats.outputMs || a.stats.dropouts != b.stats.dropouts;
     }
     const bool levelChanged = std::abs(next.level - view_.level) > 0.004f;
     view_ = std::move(next);
@@ -203,6 +208,7 @@ void MainWindow::Refresh() {
     if (listenersChanged) {
         InvalidateRect(window_, &listenersRect_, FALSE);
         InvalidateRect(window_, &statusRect_, FALSE);
+        InvalidateRect(window_, &hintRect_, FALSE);
     }
     if (levelChanged) InvalidateRect(window_, &meterRect_, FALSE);
     // "12 min" ages too, once a minute is plenty.
@@ -410,7 +416,7 @@ void MainWindow::Paint(HDC dc) {
     DrawTextIn(dc, smallFont_, theme_.secondaryText, L"Sound from", {soundRect_.left, soundRect_.top, right, soundRect_.top + Scale(18)},
                DT_LEFT | DT_SINGLELINE);
     const RECT outputLine{soundRect_.left, soundRect_.top + Scale(18), right, soundRect_.bottom - Scale(4)};
-    DrawTextIn(dc, iconFont_, theme_.text, icons::kSpeakers, {outputLine.left, outputLine.top, outputLine.left + Scale(20), outputLine.bottom},
+    DrawTextIn(dc, iconFont_, theme_.text, view_.appSource ? icons::kApp : icons::kSpeakers, {outputLine.left, outputLine.top, outputLine.left + Scale(20), outputLine.bottom},
                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     std::wstring mutedNote = view_.speakersMuted ? L"Muted on this PC" : L"";
     const int noteWidth = mutedNote.empty() ? 0 : TextWidth(window_, smallFont_, mutedNote.c_str()) + Scale(8);
@@ -447,16 +453,33 @@ void MainWindow::Paint(HDC dc) {
         }
         DrawTextIn(dc, iconFont_, Green(theme_), IsPhoneOrTablet(listener.device) ? icons::kPhone : icons::kLaptop, {listenersRect_.left, y, listenersRect_.left + Scale(20), y + rowHeight},
                    DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        // Right: the delay the device reports, dropouts if any, and for how long.
+        std::wstring detail;
+        COLORREF detailColor = theme_.secondaryText;
+        if (listener.hasStats) {
+            detail = L"≈" + std::to_wstring(listener.stats.bufferMs + listener.stats.outputMs + kPcDelayMs) + L" ms · ";
+            if (listener.stats.dropouts > 0) {
+                detail += std::to_wstring(listener.stats.dropouts) + (listener.stats.dropouts == 1 ? L" dropout" : L" dropouts");
+                detailColor = Red(theme_);
+            } else {
+                detail += Duration(now - listener.since);
+            }
+        } else {
+            detail = Duration(now - listener.since);
+        }
+        if (listener.saver) detail = L"Data saver · " + detail;
+        const int detailWidth = TextWidth(window_, smallFont_, detail.c_str()) + Scale(4);
         DrawTextIn(dc, textFont_, theme_.text, listener.device + L" · " + FormatIPv4(listener.address),
-                   {listenersRect_.left + Scale(26), y, right - Scale(80), y + rowHeight}, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        DrawTextIn(dc, smallFont_, theme_.secondaryText, Duration(now - listener.since), {right - Scale(80), y, right, y + rowHeight},
-                   DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                   {listenersRect_.left + Scale(26), y, right - detailWidth - Scale(8), y + rowHeight},
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextIn(dc, smallFont_, detailColor, detail, {right - detailWidth, y, right, y + rowHeight}, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         y += rowHeight;
     }
 
     DrawTextIn(dc, smallFont_, theme_.secondaryText,
-               L"Open the link on any phone, tablet or computer on the same network as this PC.", hintRect_,
-               DT_LEFT | DT_WORDBREAK);
+               view_.listeners.empty() ? L"Open the link on any phone, tablet or computer on the same network as this PC."
+                                       : L"Delays don't include Bluetooth headphones, which add their own (often 100–200 ms).",
+               hintRect_, DT_LEFT | DT_WORDBREAK);
 }
 
 void MainWindow::PaintQr(HDC dc) {

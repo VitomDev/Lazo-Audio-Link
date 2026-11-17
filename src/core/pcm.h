@@ -82,7 +82,24 @@ private:
     bool filling_ = false;
 };
 
+// The data saver stream: stereo folded to mono at half the sample rate,
+// a quarter of the data, for weak Wi-Fi. A low-pass filter before dropping
+// every other sample keeps the highs from folding back as noise. Keeps its
+// state between packets, so the stream stays continuous.
+class SaverDownsampler {
+public:
+    SaverDownsampler();
+    // Appends the mono samples for `frames` frames of 16-bit stereo.
+    void Process(const int16_t* stereo, size_t frames, std::vector<int16_t>& mono);
+    void Reset();
+
+private:
+    std::vector<float> taps_;
+    std::vector<float> history_;  // the last taps - 1 input samples
+    bool odd_ = false;            // the next input sample is dropped
+};
+
 // The first message of every stream: what the PCM that follows is.
-std::string StreamConfigJson(uint32_t rate, size_t framesPerPacket, std::wstring_view pcName);
+std::string StreamConfigJson(uint32_t rate, int channels, size_t framesPerPacket, std::wstring_view pcName);
 
 }  // namespace lazo
