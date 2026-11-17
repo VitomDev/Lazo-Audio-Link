@@ -35,7 +35,7 @@ Watching a video on a desktop PC without Bluetooth? Open Lazo, scan its QR code 
 - 🏠 **A link that lasts**: it uses the PC's name (`lazo-<your-pc>.local`) instead of its IP, so a page saved to your home screen keeps working when the router gives the PC another address
 - 🌐 Changed Wi-Fi? Lazo notices and listens on the new network
 - 🌙 Clean Windows 11 look that follows your light or dark theme and accent color; the listening page follows the device's theme too
-- 🪶 Tiny: a ~0.7 MB program, a ~2.3 MB installer, no .NET or Visual C++ runtime needed
+- 🪶 Tiny: a ~0.8 MB program, a ~2.4 MB installer, no .NET or Visual C++ runtime needed
 
 ---
 
@@ -94,7 +94,7 @@ Measured on the development PC (Windows 11):
 | CPU while waiting in the notification area | 0 ms over 60 s |
 | Memory | 3–4 MB private, 18–20 MB working set |
 | Network | ~1.5 Mbit/s per listening device (48 kHz, 16-bit stereo, uncompressed) |
-| `Lazo.exe` / installer | 0.7 MB / 2.3 MB |
+| `Lazo.exe` / installer | 0.8 MB / 2.4 MB |
 
 ---
 
@@ -132,8 +132,9 @@ Sending a single app needs Windows 10 version 2004 or newer.
 
 ## 🧪 Project Status
 
-🚧 In development.  
-The first version works; more features are on the way.
+✅ Stable.  
+This project is fully functional as-is and ready to use.
+Future updates to improve features or the interface are not ruled out.
 
 ---
 
