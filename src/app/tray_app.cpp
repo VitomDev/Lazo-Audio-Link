@@ -318,10 +318,29 @@ void TrayApp::PauseServer(StreamState reason) {
     mainWindow_.Refresh();
 }
 
+void TrayApp::AnswerLinkRequests() {
+    // One question at a time; requests that arrive meanwhile are asked next.
+    if (askingAboutLink_) return;
+    askingAboutLink_ = true;
+    while (const auto request = server_.PendingLinkRequest()) {
+        const std::wstring question = request->device + L" (" + FormatIPv4(request->address) +
+                                      L") is asking for Lazo's link to listen.\n\n"
+                                      L"Allow it only if it's a device you know.";
+        HWND owner = mainWindow_.IsVisible() ? mainWindow_.window() : nullptr;
+        const int answer = MessageBoxW(owner, question.c_str(), L"Lazo Audio Link · Allow this device?",
+                                       MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST);
+        if (exiting_) break;
+        server_.AnswerLinkRequest(request->id, answer == IDYES);
+    }
+    askingAboutLink_ = false;
+}
+
 void TrayApp::NewLink() {
     if (!listeners_.empty() &&
         MessageBoxW(mainWindow_.IsVisible() ? mainWindow_.window() : window_,
-                    L"Devices listening now will stop and need the new code or link. Make a new link?", L"Lazo Audio Link",
+                    L"Devices listening now will stop. To listen again they need the new code, or they can ask for the "
+                    L"new link from their page and you allow it here. Make a new link?",
+                    L"Lazo Audio Link",
                     MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
         return;
     }
@@ -560,7 +579,12 @@ LRESULT TrayApp::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         case WM_APP_SERVER:
-            if (!exiting_) OnListenersChanged();
+            if (exiting_) return 0;
+            if (static_cast<ServerEvent>(wParam) == ServerEvent::LinkRequested) {
+                AnswerLinkRequests();
+            } else {
+                OnListenersChanged();
+            }
             return 0;
         case WM_APP_SHOW_WINDOW:
             ShowWindow();

@@ -29,6 +29,7 @@ Watching a video on a desktop PC without Bluetooth? Open Lazo, scan its QR code 
 - 🔁 **Follows your outputs**: switch the default speakers in Windows and Lazo follows at once; unplugged devices are picked up again when they come back
 - 🔒 **Private by design**
   - Every connection needs the secret key in the QR code. **New link** changes it at once
+  - A device with an old link can ask for the new one, but only gets it if you allow it on the PC
   - Only devices on your private network (home Wi-Fi) can connect, and only Lazo's own page can open the audio stream
   - Optionally pauses after 15, 30 or 60 minutes with nobody listening
   - The PC's sound is only recorded while a device is listening
@@ -64,6 +65,7 @@ Uninstalling (Settings → Apps) removes Lazo, its startup entry and its setting
 | Send only one app | **Settings** → **Send the sound of** → pick the app under **Only one app** |
 | Copy the link | **Copy link** in the window, or right-click the tray icon → **Copy link** |
 | Stop old links from working | **New link** (devices must use the new code or link) |
+| Link changed on a device | Tap **Get the new link** on its page and click **Yes** on the PC: no need to scan the code again |
 | Pause or resume streaming | **Pause streaming** in the window, or from the tray icon's menu |
 | Keep Lazo running | Close the window: Lazo stays in the notification area |
 | Open the window again | Click the tray icon, or start Lazo again |

@@ -79,7 +79,15 @@ p { margin: 0; }
 .gap { height: 1px; background: var(--line); margin: 14px 0; }
 input[type=range]:disabled { opacity: .45; }
 #expired { display: none; border-color: var(--bad); }
-#expired p { color: var(--bad); }
+#expired h2 { font-size: 17px; margin: 0 0 4px; }
+#expired .hint { margin: 0 0 14px; }
+#getLink {
+  -webkit-appearance: none; appearance: none; width: 100%; border: 0; border-radius: 14px; cursor: pointer;
+  padding: 15px 16px; font: inherit; font-size: 17px; font-weight: 600; background: var(--accent); color: var(--accent-text);
+}
+#getLink:disabled { opacity: .6; cursor: default; }
+#linkNote { margin: 10px 0 0; text-align: center; }
+#linkNote.bad { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -95,7 +103,12 @@ input[type=range]:disabled { opacity: .45; }
     <span id="label">Listen</span>
   </button>
 
-  <section id="expired"><p>This link has changed. Scan the QR code on the PC again.</p></section>
+  <section id="expired">
+    <h2>This link has changed</h2>
+    <p class="hint">Get the new one from the PC: no need to scan the code again.</p>
+    <button id="getLink" type="button">Get the new link</button>
+    <p class="hint" id="linkNote">Lazo will ask on the PC whether to allow this device.</p>
+  </section>
 
   <section>
     <div class="row"><span>Status</span><span id="status">Stopped</span></div>
@@ -276,13 +289,48 @@ function connect() {
     // Several failures in a row: the PC may have a new link.
     if (failures === 3) {
       fetch('/api/ping' + location.search, { cache: 'no-store' }).then(r => {
-        if (r.status === 403) { stop(); $('#expired').style.display = 'block'; }
+        if (r.status === 403) { stop(); showExpired(); }
       }).catch(() => {});
     }
     retry = setTimeout(connect, 1000);
   };
   socket.onerror = () => socket.close();
 }
+
+// The PC made a new link (or this one is old). Rather than scanning the code
+// again, ask the PC for it: Lazo shows the request there, and only if its
+// user allows it does the new link come back. Then the page reopens with it.
+function showExpired() {
+  $('#expired').style.display = 'block';
+  $('#listen').style.display = 'none';
+}
+
+function linkNote(text, bad = false) { const n = $('#linkNote'); n.textContent = text; n.className = 'hint' + (bad ? ' bad' : ''); }
+
+$('#getLink').onclick = async () => {
+  const button = $('#getLink');
+  button.disabled = true;
+  button.textContent = 'Waiting for the PC\u2026';
+  linkNote('Click Allow on the PC.');
+  let message = 'Can\u2019t reach the PC. Is it on the same network?';
+  try {
+    const r = await fetch('/api/link', { method: 'POST', cache: 'no-store' });
+    if (r.ok) {
+      const { link } = await r.json();
+      if (link) { linkNote('Opening the new link\u2026'); location.replace(link); return; }
+    }
+    message = r.status === 403 ? 'The PC didn\u2019t allow it.'
+            : r.status === 408 ? 'No answer from the PC. Try again.'
+            : r.status === 429 ? 'The PC is already being asked. Answer it there.'
+            : message;
+  } catch {}
+  button.disabled = false;
+  button.textContent = 'Try again';
+  linkNote(message, true);
+};
+
+// An old link is noticed as soon as the page opens.
+fetch('/api/ping' + location.search, { cache: 'no-store' }).then(r => { if (r.status === 403) showExpired(); }).catch(() => {});
 
 // Network -> ring buffer
 function push(buf) {
@@ -398,35 +446,6 @@ std::string Join() {
 
 const std::string& PageHtml() {
     static const std::string page = Join();
-    return page;
-}
-
-const std::string& ExpiredPageHtml() {
-    static const std::string page = R"LAZO(<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<meta name="referrer" content="no-referrer">
-<title>Lazo — Link changed</title>
-<style>
-body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box;
-       font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-       background: #f4f5f8; color: #1a1c22; text-align: center; }
-@media (prefers-color-scheme: dark) { body { background: #14151a; color: #eef0f4; } }
-h1 { font-size: 20px; margin: 0 0 8px; }
-p { margin: 0; opacity: .75; max-width: 320px; }
-</style>
-</head>
-<body>
-<div>
-<h1>This link no longer works</h1>
-<p>Open Lazo on the PC and scan its QR code again, or open its new link.</p>
-</div>
-</body>
-</html>
-)LAZO";
     return page;
 }
 

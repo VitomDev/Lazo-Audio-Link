@@ -734,7 +734,8 @@ TEST(PageIsSelfContained) {
     CHECK(page.find("createScriptProcessor(1024, 1, 2)") != std::string::npos);
     CHECK(page.find("navigator.audioSession.type = 'playback'") != std::string::npos);
     CHECK(page.find("/ws${location.search}") != std::string::npos);
-    CHECK(ExpiredPageHtml().find("scan its QR code") != std::string::npos);
+    // An old link asks the PC for the new one instead of a dead end.
+    CHECK(page.find("fetch('/api/link', { method: 'POST'") != std::string::npos);
 }
 
 TEST(EncodesQrCodes) {
@@ -798,14 +799,73 @@ TEST(ServerRequiresTheToken) {
     CHECK(page.status == 200);
     CHECK(page.body == PageHtml());
     CHECK(page.head.find("Content-Security-Policy:") != std::string::npos);
-    CHECK(Request(test.port(), Get("/")).status == 403);
-    CHECK(Request(test.port(), Get("/?t=ffffffffffffffffffffffffffffffff")).status == 403);
+    // The page itself opens with any link (it holds no secret)...
+    CHECK(Request(test.port(), Get("/?t=ffffffffffffffffffffffffffffffff")).body == PageHtml());
+    // ...but the stream and the check behind it need the token.
+    CHECK(Request(test.port(), UpgradeRequest("/ws?t=ffffffffffffffffffffffffffffffff", test.port())).status == 403);
+    CHECK(Request(test.port(), Get("/api/ping")).status == 403);
     CHECK(Request(test.port(), Get(std::string("/api/ping?t=") + kToken)).status == 204);
     CHECK(Request(test.port(), Get("/api/ping?t=old")).status == 403);
     CHECK(Request(test.port(), Get("/nothing")).status == 404);
     // The home screen icon needs no token.
     const Response icon = Request(test.port(), Get("/apple-touch-icon.png"));
     CHECK(icon.status == 200 && icon.body == "\x89PNG-test");
+}
+
+std::string Post(const std::string& target) {
+    return "POST " + target + " HTTP/1.1\r\nHost: x\r\nUser-Agent: Mozilla/5.0 (iPhone)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+}
+
+// Asks for the link on another thread; the answer comes from the "PC".
+struct LinkAsk {
+    Response response;
+    std::thread thread;
+    explicit LinkAsk(int port) : thread([this, port] { response = Request(port, Post("/api/link")); }) {}
+    ~LinkAsk() {
+        if (thread.joinable()) thread.join();
+    }
+    Response Wait() {
+        thread.join();
+        return response;
+    }
+};
+
+TEST(ServerGivesTheLinkOnlyWhenThePcAllows) {
+    TestServer test;
+    {
+        LinkAsk ask(test.port());
+        CHECK(WaitFor([&] { return test.server.PendingLinkRequest().has_value(); }));
+        const auto request = *test.server.PendingLinkRequest();
+        CHECK(request.device == L"iPhone" && request.address == kLoopback);
+        test.server.AnswerLinkRequest(request.id, true);
+        const Response response = ask.Wait();
+        CHECK(response.status == 200);
+        CHECK(response.body == "{\"link\":\"http://127.0.0.1:18765/?t=" + std::string(kToken) + "\"}");
+    }
+    {
+        LinkAsk ask(test.port());
+        CHECK(WaitFor([&] { return test.server.PendingLinkRequest().has_value(); }));
+        test.server.AnswerLinkRequest(test.server.PendingLinkRequest()->id, false);
+        const Response response = ask.Wait();
+        CHECK(response.status == 403 && response.body.find(kToken) == std::string::npos);
+    }
+    CHECK(!test.server.PendingLinkRequest());
+    // GET is not a way in.
+    CHECK(Request(test.port(), Get("/api/link")).status == 405);
+}
+
+TEST(ServerAsksOncePerDeviceAndGivesUpWhenStopped) {
+    TestServer test;
+    LinkAsk first(test.port());
+    CHECK(WaitFor([&] { return test.server.PendingLinkRequest().has_value(); }));
+    // The same device asking again while the PC decides is turned away.
+    CHECK(Request(test.port(), Post("/api/link")).status == 429);
+    // Stopping (a new link, a pause) ends the wait at once, without the link.
+    const ULONGLONG start = GetTickCount64();
+    test.server.Stop();
+    const Response response = first.Wait();
+    CHECK(GetTickCount64() - start < 5000);
+    CHECK(response.status != 200 && response.body.find(kToken) == std::string::npos);
 }
 
 TEST(ServerRefusesBadUpgrades) {

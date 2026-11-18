@@ -43,6 +43,8 @@ private:
     void NewLink();
     void CheckNetworkAndIdle();
     void OnListenersChanged();
+    // Asks the PC's user about each page that wants the new link.
+    void AnswerLinkRequests();
     void UpdateMute();
     void RestoreMute();
 
@@ -63,6 +65,7 @@ private:
     NOTIFYICONDATAW icon_{};
     bool exiting_ = false;
     bool closeHintShown_ = false;
+    bool askingAboutLink_ = false;
 
     Settings settings_;
     Server server_;

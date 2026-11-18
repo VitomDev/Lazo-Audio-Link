@@ -26,6 +26,9 @@ constexpr size_t kMaxQueuedBytes = 32 * 1024;
 constexpr int kSocketSendBuffer = 32 * 1024;
 // The page sends nothing but control frames.
 constexpr size_t kMaxIncomingFrame = 4096;
+// Pages asking for the new link: how many may wait, and for how long.
+constexpr size_t kMaxLinkRequests = 4;
+constexpr DWORD kLinkRequestTimeoutMs = 60'000;
 
 constexpr char kCommonHeaders[] =
     "Cache-Control: no-store\r\n"
@@ -51,6 +54,8 @@ const char* StatusText(int status) {
         case 403: return "Forbidden";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
+        case 408: return "Request Timeout";
+        case 429: return "Too Many Requests";
         case 503: return "Service Unavailable";
         default: return "Error";
     }
@@ -144,6 +149,8 @@ void Server::Stop() {
         client->closing = true;
         client->wake.notify_all();
     }
+    // Requests still waiting for the PC's answer end now.
+    requestAnswered_.notify_all();
     idle_.wait(lock, [this] { return connections_.empty(); });
 }
 
@@ -231,8 +238,63 @@ ULONGLONG Server::LastListening() const {
     return clients_.empty() ? lastListening_ : GetTickCount64();
 }
 
-void Server::Notify() {
-    if (notifyWindow_) PostMessageW(notifyWindow_, notifyMessage_, static_cast<WPARAM>(ServerEvent::ListenersChanged), 0);
+void Server::Notify(ServerEvent event) {
+    if (notifyWindow_) PostMessageW(notifyWindow_, notifyMessage_, static_cast<WPARAM>(event), 0);
+}
+
+struct Server::PendingRequest {
+    LinkRequest info;
+    int answer = -1;  // -1 waiting, 0 refused, 1 allowed
+};
+
+std::optional<LinkRequest> Server::PendingLinkRequest() const {
+    std::lock_guard lock(mutex_);
+    for (const auto& request : requests_) {
+        if (request->answer < 0) return request->info;
+    }
+    return std::nullopt;
+}
+
+void Server::AnswerLinkRequest(uint32_t id, bool allow) {
+    std::lock_guard lock(mutex_);
+    for (const auto& request : requests_) {
+        if (request->info.id == id && request->answer < 0) request->answer = allow ? 1 : 0;
+    }
+    requestAnswered_.notify_all();
+}
+
+bool Server::HandleLinkRequest(SOCKET socket, const RequestHead& request, uint32_t peer) {
+    auto pending = std::make_shared<PendingRequest>();
+    {
+        std::lock_guard lock(mutex_);
+        // One question at a time per device, and a few at most: nobody can
+        // bury the PC under dialogs.
+        const bool asking = std::any_of(requests_.begin(), requests_.end(),
+                                        [peer](const auto& other) { return other->info.address == peer; });
+        if (asking || requests_.size() >= kMaxLinkRequests) {
+            return SendResponse(socket, 429, "application/json", "{\"error\":\"busy\"}", false);
+        }
+        pending->info.id = nextId_++;
+        pending->info.device = DeviceNameFromUserAgent(request.userAgent);
+        pending->info.address = peer;
+        requests_.push_back(pending);
+    }
+    Notify(ServerEvent::LinkRequested);
+
+    int answer;
+    {
+        std::unique_lock lock(mutex_);
+        requestAnswered_.wait_for(lock, std::chrono::milliseconds(kLinkRequestTimeoutMs),
+                                  [&] { return pending->answer >= 0 || !running_; });
+        answer = pending->answer;
+        std::erase(requests_, pending);
+    }
+    if (answer == 1) {
+        return SendResponse(socket, 200, "application/json",
+                            "{\"link\":\"" + JsonEscape(ToUtf8(Url())) + "\"}", false);
+    }
+    return SendResponse(socket, answer == 0 ? 403 : 408, "application/json",
+                        answer == 0 ? "{\"error\":\"refused\"}" : "{\"error\":\"no answer\"}", false);
 }
 
 void Server::AcceptLoop() {
@@ -298,8 +360,11 @@ void Server::Serve(SOCKET socket, uint32_t peer) {
     }
 }
 
-bool Server::Handle(SOCKET socket, const RequestHead& request, uint32_t) {
-    if (request.method != "GET" && request.method != "HEAD") return SendError(socket, 405);
+bool Server::Handle(SOCKET socket, const RequestHead& request, uint32_t peer) {
+    if (request.path == "/api/link") {
+        return request.method == "POST" ? HandleLinkRequest(socket, request, peer) : SendError(socket, 405);
+    }
+    if (request.method != "GET") return SendError(socket, 405);
 
     // The home screen icon carries no token; it is only a picture.
     if (request.path == "/apple-touch-icon.png" || request.path == "/apple-touch-icon-precomposed.png" ||
@@ -312,8 +377,9 @@ bool Server::Handle(SOCKET socket, const RequestHead& request, uint32_t) {
     const std::string token = QueryParam(request.query, "t").value_or("");
     const bool authorized = TokensEqual(token, options_.token);
     if (request.path == "/") {
-        // Old links and guessed addresses end here.
-        if (!authorized) return SendResponse(socket, 403, "text/html; charset=utf-8", ExpiredPageHtml(), false);
+        // The page itself holds no secret: with an old link it opens all the
+        // same and offers to ask the PC for the new one. Only the stream
+        // needs the token.
         const std::string csp = "Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; "
                                 "style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://" +
                                 request.host +

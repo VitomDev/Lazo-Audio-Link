@@ -12,6 +12,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -20,7 +21,14 @@
 namespace lazo {
 
 // Posted to the notify window as wParam of its message, from server threads.
-enum class ServerEvent : WPARAM { ListenersChanged = 1 };
+enum class ServerEvent : WPARAM { ListenersChanged = 1, LinkRequested = 2 };
+
+// A page with an old link asking for the current one. The PC's user decides.
+struct LinkRequest {
+    uint32_t id = 0;
+    std::wstring device;   // "iPhone"
+    uint32_t address = 0;  // host byte order
+};
 
 struct Listener {
     uint32_t id = 0;
@@ -85,15 +93,25 @@ public:
     // one listens.
     ULONGLONG LastListening() const;
 
+    // A page whose link changed can ask for the new one without scanning the
+    // code again. The request waits until the PC's user allows or refuses it
+    // (or a minute passes): the link is never handed out on its own, or
+    // anyone on the network could have it and "New link" could not lock a
+    // device out.
+    std::optional<LinkRequest> PendingLinkRequest() const;
+    void AnswerLinkRequest(uint32_t id, bool allow);
+
 private:
     struct Client;
+    struct PendingRequest;
+    bool HandleLinkRequest(SOCKET socket, const RequestHead& request, uint32_t peer);
 
     void AcceptLoop();
     void Serve(SOCKET socket, uint32_t peer);
     bool Handle(SOCKET socket, const RequestHead& request, uint32_t peer);
     void ServeWebSocket(SOCKET socket, const RequestHead& request, uint32_t peer);
     std::string ConfigFrame(bool saver) const;  // needs mutex_
-    void Notify();
+    void Notify(ServerEvent event = ServerEvent::ListenersChanged);
 
     HWND notifyWindow_;
     UINT notifyMessage_;
@@ -114,6 +132,8 @@ private:
     SaverDownsampler saverDownsampler_;
     std::vector<int16_t> saverSamples_;
     ULONGLONG lastListening_ = 0;
+    std::vector<std::shared_ptr<PendingRequest>> requests_;
+    std::condition_variable requestAnswered_;
 };
 
 }  // namespace lazo
